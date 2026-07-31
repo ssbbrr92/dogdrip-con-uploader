@@ -1,0 +1,34 @@
+DogDrip.Con Uploader 배포 라이선스 점검
+========================================
+
+점검 결론
+---------
+- Python 오픈소스 의존성과 산돌 삼립호빵체 Basic은 각 라이선스 조건을 준수하면 무료 배포할 수 있습니다.
+- 개드립넷에서 내려받은 프로필 아이콘(ic_profile_dd.png)은 별도의 재배포 라이선스를 확인하지 못했습니다.
+- 따라서 해당 아이콘을 포함한 실행 파일의 공개 배포 전에는 개드립넷에 사용·재배포 허가를 확인하는 것이 안전합니다.
+- DogDrip 이름과 사이트 서비스에 대한 공식 제휴 또는 보증을 의미하지 않도록 “비공식 소프트웨어”라고 표시했습니다.
+
+주요 구성요소
+------------
+- 산돌 삼립호빵체 Basic: SIL Open Font License 1.1
+  저작권자: (주)SPC삼립, (주)산돌
+  출처 및 라이선스: https://noonnu.cc/font_page/507
+- Requests: Apache License 2.0
+  https://github.com/psf/requests
+- websocket-client: Apache License 2.0
+  https://github.com/websocket-client/websocket-client
+- certifi: Mozilla Public License 2.0
+  https://github.com/certifi/python-certifi
+- charset-normalizer: MIT License
+  https://github.com/jawah/charset_normalizer
+- idna: BSD-3-Clause License
+  https://github.com/kjd/idna
+- urllib3: MIT License
+  https://github.com/urllib3/urllib3
+- PyInstaller: GPL-2.0-or-later WITH Bootloader-exception
+  https://github.com/pyinstaller/pyinstaller
+
+주의
+----
+이 문서는 일반적인 라이선스 점검 결과이며 법률 자문이 아닙니다. 실제 공개 배포 시에는 각 라이선스 원문과
+저작권 고지를 함께 제공하고, 개드립넷 이미지 및 명칭 사용에 대해서는 권리자에게 확인하는 것이 안전합니다.
