@@ -1,14 +1,175 @@
+import os
+import io
+import sys
 import tempfile
 import unittest
-import sys
-import types
 from pathlib import Path
+from PIL import Image as PILImage
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.modules.setdefault("requests", types.ModuleType("requests"))
-sys.modules.setdefault("websocket", types.ModuleType("websocket"))
 
-from app import MAPPING_DEFAULTS, collect_files, read_mapping_file, render_content
+from app import (
+    App,
+    DEFAULT_URL,
+    LEGACY_MAPPING_FILENAME,
+    LEGACY_PROFILE_DIRECTORY,
+    LEGACY_SETTINGS_FILENAME,
+    MAPPING_DEFAULTS,
+    MAPPING_FILENAME,
+    PROFILE_DIRECTORY,
+    SETTINGS_FILENAME,
+    TagBadgeInput,
+    WysiwygEditor,
+    build_content_syntax,
+    collect_files,
+    decode_preview_image,
+    matching_image_dimension,
+    migrate_legacy_config,
+    read_mapping_file,
+    render_content,
+)
+
+
+class ImagePreviewTests(unittest.TestCase):
+    def test_decodes_webp_and_jpeg_and_scales_preview(self):
+        for image_format in ("WEBP", "JPEG"):
+            source = PILImage.new("RGB", (800, 400), "red")
+            encoded = io.BytesIO()
+            source.save(encoded, format=image_format)
+            preview = decode_preview_image(encoded.getvalue(), 320, 140)
+            self.assertEqual(preview.mode, "RGBA")
+            self.assertLessEqual(preview.width, 320)
+            self.assertLessEqual(preview.height, 140)
+
+    def test_matches_opposite_dimension_from_original_ratio(self):
+        self.assertEqual(matching_image_dimension(400, 1600, 900), 225)
+        self.assertEqual(matching_image_dimension(225, 900, 1600), 400)
+
+    def test_rejects_non_positive_ratio_dimensions(self):
+        with self.assertRaises(ValueError):
+            matching_image_dimension(320, 0, 200)
+
+
+class TagBadgeInputTests(unittest.TestCase):
+    def test_korean_kieuk_does_not_commit_but_actual_comma_does(self):
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.geometry("300x80+-10000+-10000")
+        try:
+            value = tk.StringVar()
+            widget = TagBadgeInput(root, value)
+            widget.pack()
+            root.update()
+            empty_height = widget.winfo_height()
+            widget.input_var.set("그림ㅋ")
+            root.update()
+            self.assertEqual(widget.tags, [])
+            self.assertEqual(widget.input_var.get(), "그림ㅋ")
+
+            widget.input_var.set("그림콘,")
+            root.update()
+            self.assertEqual(widget.tags, ["그림콘"])
+            self.assertEqual(widget.input_var.get(), "")
+            self.assertEqual(widget.winfo_height(), empty_height)
+            badge = widget.badge_frame.winfo_children()[0]
+            tag_label, close_label = badge.winfo_children()
+            self.assertEqual(close_label.cget("text"), "X")
+            self.assertEqual(close_label.cget("font"), tag_label.cget("font"))
+            self.assertEqual(close_label.winfo_rootx() - (tag_label.winfo_rootx() + tag_label.winfo_width()), 2)
+        finally:
+            root.destroy()
+
+
+class SimpleVar:
+    def __init__(self, value=""):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+
+class DefaultUrlTests(unittest.TestCase):
+    def test_reset_default_url_restores_and_saves_address(self):
+        app = object.__new__(App)
+        app.url = SimpleVar("https://naver.com")
+        calls = []
+        app.save_settings = lambda: calls.append("saved")
+        app.set_status = lambda text: calls.append(text)
+        app.write_log = lambda text: calls.append(text)
+
+        app.reset_default_url()
+
+        self.assertEqual(app.url.get(), DEFAULT_URL)
+        self.assertEqual(calls[0], "saved")
+
+
+class SimpleText:
+    def __init__(self, value=""):
+        self.value = value
+
+    def index(self, _mark):
+        return f"1.{len(self.value)}"
+
+    def get(self, _start, _end):
+        return ""
+
+    def insert(self, _mark, text):
+        self.value += text
+
+    def focus_set(self):
+        pass
+
+
+class SimpleEditor:
+    def __init__(self):
+        self.value = ""
+
+    def insert_html(self, value):
+        self.value += value
+
+    def focus_editor(self):
+        pass
+
+
+@unittest.skip("Legacy Markdown expectations replaced by HTML-only editor tests")
+class ContentToolbarTests(unittest.TestCase):
+    def test_builds_link(self):
+        self.assertEqual(build_content_syntax("link", text="개드립", url="https://www.dogdrip.net"), "[개드립](https://www.dogdrip.net)")
+
+    def test_builds_image(self):
+        self.assertEqual(build_content_syntax("image", text="설명", url="https://example.com/a.png"), "![설명](https://example.com/a.png)")
+
+    def test_builds_image_without_description(self):
+        self.assertEqual(build_content_syntax("image", text="", url="https://example.com/a.png"), "![](https://example.com/a.png)")
+
+    def test_link_still_requires_display_text(self):
+        with self.assertRaisesRegex(ValueError, "표시 텍스트"):
+            build_content_syntax("link", text="", url="https://example.com")
+
+    def test_removes_duplicated_url_schemes(self):
+        self.assertEqual(build_content_syntax("link", text="링크", url="https://http://example.com"), "[링크](http://example.com)")
+        self.assertEqual(build_content_syntax("image", text="이미지", url="https://https://example.com/a.png"), "![이미지](https://example.com/a.png)")
+
+    def test_builds_sized_image(self):
+        self.assertEqual(build_content_syntax("sized_image", text="설명", url="https://example.com/a.png", width="320", height="200"), "![설명](https://example.com/a.png){320,200}")
+
+    def test_rejects_invalid_url(self):
+        with self.assertRaisesRegex(ValueError, "http"):
+            build_content_syntax("link", text="개드립", url="javascript:alert(1)")
+
+    def test_rejects_invalid_dimensions(self):
+        with self.assertRaisesRegex(ValueError, "1~4096"):
+            build_content_syntax("sized_image", text="설명", url="https://example.com/a.png", width="0", height="200")
+
+    def test_inserts_rule_on_its_own_line(self):
+        app = object.__new__(App)
+        app.content_editor = SimpleEditor()
+        app.insert_content_syntax("rule")
+        self.assertEqual(app.content_editor.value, "<hr>")
 
 
 class NumberedFilesTests(unittest.TestCase):
@@ -36,7 +197,28 @@ class NumberedFilesTests(unittest.TestCase):
                 ["apple.gif", "Banana.webp", "image2.png", "image10.png"],
             )
 
+    def test_reverse_filename_order(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for name in ("image10.png", "image2.png", "apple.gif"):
+                Path(folder, name).touch()
+            files, _ = collect_files(folder, "name_desc")
+            self.assertEqual([path.name for path in files], ["image10.png", "image2.png", "apple.gif"])
 
+    def test_modified_date_order_both_directions(self):
+        with tempfile.TemporaryDirectory() as folder:
+            old = Path(folder, "old.png")
+            new = Path(folder, "new.png")
+            old.touch()
+            new.touch()
+            os.utime(old, (1000, 1000))
+            os.utime(new, (2000, 2000))
+            ascending, _ = collect_files(folder, "mtime")
+            descending, _ = collect_files(folder, "mtime_desc")
+            self.assertEqual([path.name for path in ascending], ["old.png", "new.png"])
+            self.assertEqual([path.name for path in descending], ["new.png", "old.png"])
+
+
+@unittest.skip("Markdown rendering is intentionally no longer supported")
 class ContentRenderingTests(unittest.TestCase):
     def test_converts_https_markdown_link(self):
         rendered = render_content("사이트: [개드립](https://www.dogdrip.net/)\n끝")
@@ -80,7 +262,123 @@ class ContentRenderingTests(unittest.TestCase):
         self.assertEqual(rendered, "앞 --- 뒤")
 
 
+class HtmlOnlyEditorTests(unittest.TestCase):
+    def test_toolbar_builds_html_directly(self):
+        self.assertEqual(
+            build_content_syntax("link", text="DogDrip", url="https://www.dogdrip.net"),
+            '<a href="https://www.dogdrip.net" target="_blank">DogDrip</a>',
+        )
+        self.assertEqual(
+            build_content_syntax("image", text="", url="https://example.com/a.webp"),
+            '<img src="https://example.com/a.webp" alt="">',
+        )
+        self.assertIn(
+            'width="320" height="200"',
+            build_content_syntax("sized_image", text="preview", url="https://example.com/a.jpg", width="320", height="200"),
+        )
+
+    def test_plain_markdown_like_text_is_not_interpreted(self):
+        source = "[link](https://example.com)\n![](https://example.com/a.png)\n---"
+        rendered = render_content(source)
+        self.assertEqual(rendered, source.replace("\n", "<br>"))
+        self.assertNotIn("<a ", rendered)
+        self.assertNotIn("<img ", rendered)
+        self.assertNotIn("<hr", rendered)
+
+    def test_image_size_allows_single_dimension(self):
+        width_only = build_content_syntax("sized_image", text="", url="https://example.com/a.png", width="320", height="")
+        self.assertIn('width="320"', width_only)
+        self.assertNotIn("height=", width_only)
+        height_only = build_content_syntax("sized_image", text="", url="https://example.com/a.png", width="", height="200")
+        self.assertIn('height="200"', height_only)
+        self.assertNotIn("width=", height_only)
+
+    def test_html_toolbar_validation_is_preserved(self):
+        with self.assertRaises(ValueError):
+            build_content_syntax("link", text="", url="https://example.com")
+        with self.assertRaises(ValueError):
+            build_content_syntax("image", text="preview", url="javascript:alert(1)")
+        with self.assertRaises(ValueError):
+            build_content_syntax("sized_image", text="preview", url="https://example.com/a.png", width="0", height="200")
+
+    def test_existing_link_can_be_edited(self):
+        import tkinter as tk
+        from tkinter import ttk
+
+        root = tk.Tk()
+        root.geometry("640x400+-10000+-10000")
+        try:
+            editor = WysiwygEditor(root, '<a href="https://old.example">Old text</a>')
+            editor.pack(fill="both", expand=True)
+            root.update()
+            tag = next(iter(editor.links))
+            binding = editor.text.tk.call(editor.text._w, "tag", "bind", tag, "<Button-3>")
+            self.assertTrue(binding)
+            editor._open_link_edit(tag)
+            root.update()
+            dialog = next(widget for widget in root.winfo_children() if isinstance(widget, tk.Toplevel))
+
+            def descendants(widget):
+                for child in widget.winfo_children():
+                    yield child
+                    yield from descendants(child)
+
+            entries = [widget for widget in descendants(dialog) if isinstance(widget, ttk.Entry)]
+            entries[0].delete(0, "end"); entries[0].insert(0, "New text")
+            entries[1].delete(0, "end"); entries[1].insert(0, "https://new.example")
+            confirm = next(widget for widget in descendants(dialog) if isinstance(widget, ttk.Button) and widget.cget("text") == "확인")
+            confirm.invoke()
+            root.update()
+            self.assertIn('href="https://new.example"', editor.get_html())
+            self.assertIn(">New text</a>", editor.get_html())
+        finally:
+            root.destroy()
+
+
 class MappingConfigTests(unittest.TestCase):
+    def test_migrates_legacy_browser_profile_directory_with_contents(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            legacy_profile = directory / LEGACY_PROFILE_DIRECTORY
+            legacy_profile.mkdir()
+            (legacy_profile / "Login Data").write_text("preserved", encoding="utf-8")
+
+            current_profile = migrate_legacy_config(directory, LEGACY_PROFILE_DIRECTORY, PROFILE_DIRECTORY)
+
+            self.assertFalse(legacy_profile.exists())
+            self.assertEqual((current_profile / "Login Data").read_text(encoding="utf-8"), "preserved")
+
+    def test_migrates_legacy_json_and_ini_without_changing_content(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            legacy_json = directory / LEGACY_SETTINGS_FILENAME
+            legacy_ini = directory / LEGACY_MAPPING_FILENAME
+            json_content = '{"url": "https://example.com", "tags": "one,two"}'
+            ini_content = '[mapping]\\ntarget_host = example.com\\n'
+            legacy_json.write_text(json_content, encoding="utf-8")
+            legacy_ini.write_text(ini_content, encoding="utf-8")
+
+            new_json = migrate_legacy_config(directory, LEGACY_SETTINGS_FILENAME, SETTINGS_FILENAME)
+            new_ini = migrate_legacy_config(directory, LEGACY_MAPPING_FILENAME, MAPPING_FILENAME)
+
+            self.assertFalse(legacy_json.exists())
+            self.assertFalse(legacy_ini.exists())
+            self.assertEqual(new_json.read_text(encoding="utf-8"), json_content)
+            self.assertEqual(new_ini.read_text(encoding="utf-8"), ini_content)
+
+    def test_existing_new_config_is_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            legacy = directory / LEGACY_SETTINGS_FILENAME
+            current = directory / SETTINGS_FILENAME
+            legacy.write_text("legacy", encoding="utf-8")
+            current.write_text("current", encoding="utf-8")
+
+            result = migrate_legacy_config(directory, LEGACY_SETTINGS_FILENAME, SETTINGS_FILENAME)
+
+            self.assertEqual(result.read_text(encoding="utf-8"), "current")
+            self.assertEqual(legacy.read_text(encoding="utf-8"), "legacy")
+
     def test_duplicate_keys_use_last_value(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder, "settings.ini")

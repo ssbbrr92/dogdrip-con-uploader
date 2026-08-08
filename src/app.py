@@ -1,6 +1,8 @@
 import json
 import html
+import io
 import configparser
+import ctypes
 import os
 import re
 import shutil
@@ -8,23 +10,34 @@ import subprocess
 import sys
 import threading
 import time
+
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from html.parser import HTMLParser
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 import requests
 import websocket
+from PIL import Image, ImageTk
 
 
 APP_TITLE = "개드립콘 폴더 업로더"
 BRAND_TITLE = "DogDrip.Con Uploader"
+APP_VERSION = "1.0.1"
 DEFAULT_URL = "https://www.dogdrip.net/index.php?mid=dogcon&act=dispDogconWrite"
+SETTINGS_FILENAME = "dogdrip-con-uploader-settings.json"
+MAPPING_FILENAME = "dogdrip-con-uploader.ini"
+LEGACY_SETTINGS_FILENAME = "dogcon-uploader-settings.json"
+LEGACY_MAPPING_FILENAME = "dogcon-uploader.ini"
+PROFILE_DIRECTORY = "dogdrip-con-browser-profile"
+LEGACY_PROFILE_DIRECTORY = "dogcon-browser-profile"
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-MARKDOWN_TOKEN = re.compile(
-    r"!\[([^\]\n]*)\]\((https?://[^\s)]+)\)(?:\{(\d{1,5})\s*,\s*(\d{1,5})\})?|"
-    r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)",
-    re.IGNORECASE,
-)
+SORT_OPTIONS = {
+    "파일 이름": "name",
+    "파일 이름 (역순)": "name_desc",
+    "수정된 날짜": "mtime",
+    "수정된 날짜 (역순)": "mtime_desc",
+}
 MAPPING_DEFAULTS = {
     "target_host": "dogdrip.net",
     "main_file_name": "dogcon_main_file",
@@ -37,16 +50,112 @@ MAPPING_DEFAULTS = {
 }
 
 
+def build_content_syntax(kind, text="", url="", width="", height=""):
+    text = text.strip()
+    url = normalize_url_prefix(url)
+    if kind not in {"link", "image", "sized_image"}:
+        raise ValueError("지원하지 않는 본문 문법입니다.")
+    if kind == "link" and not text:
+        raise ValueError("표시 텍스트를 입력해 주세요.")
+    if "]" in text or "\n" in text:
+        raise ValueError("텍스트에는 ] 문자나 줄바꿈을 사용할 수 없습니다.")
+    if not re.fullmatch(r"https?://\S+", url, re.IGNORECASE):
+        raise ValueError("주소는 http:// 또는 https://로 시작해야 하며 공백을 포함할 수 없습니다.")
+    if kind == "link":
+        return f'<a href="{html.escape(url, quote=True)}" target="_blank">{html.escape(text)}</a>'
+    if kind == "image":
+        return f'<img src="{html.escape(url, quote=True)}" alt="{html.escape(text, quote=True)}">'
+    try:
+        width_value = int(str(width).strip()) if str(width).strip() else None
+        height_value = int(str(height).strip()) if str(height).strip() else None
+    except ValueError as exc:
+        raise ValueError("가로와 세로는 숫자로 입력해 주세요.") from exc
+    if not width_value and not height_value:
+        return f'<img src="{html.escape(url, quote=True)}" alt="{html.escape(text, quote=True)}">'
+    if any(value is not None and not 1 <= value <= 4096 for value in (width_value, height_value)):
+        raise ValueError("가로와 세로는 1~4096 사이로 입력해 주세요.")
+    size = (f' width="{width_value}"' if width_value else "") + (f' height="{height_value}"' if height_value else "")
+    return f'<img src="{html.escape(url, quote=True)}" alt="{html.escape(text, quote=True)}"{size} data-sized="1">'
+
+
+def normalize_url_prefix(value):
+    value = (value or "").strip()
+    match = re.match(r"^((?:https?://){2,})(.*)$", value, re.IGNORECASE)
+    if not match:
+        return value
+    schemes = re.findall(r"https?://", match.group(1), re.IGNORECASE)
+    return schemes[-1].lower() + match.group(2)
+
+
+def center_toplevel(window, parent, width=None, height=None):
+    parent.update_idletasks()
+    window.update_idletasks()
+    width = width or window.winfo_width() or window.winfo_reqwidth()
+    height = height or window.winfo_height() or window.winfo_reqheight()
+    x = parent.winfo_x() + (parent.winfo_width() - width) // 2
+    y = parent.winfo_y() + (parent.winfo_height() - height) // 2
+    x = max(0, min(x, window.winfo_screenwidth() - width))
+    y = max(0, min(y, window.winfo_screenheight() - height))
+    window.geometry(f"{width}x{height}+{x}+{y}")
+
+
+def centered_messagebox(parent, kind, title, message):
+    dialog = tk.Toplevel(parent)
+    dialog.withdraw()
+    dialog.title(title)
+    dialog.transient(parent)
+    dialog.resizable(False, False)
+    dialog.configure(bg="#ffffff")
+    dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+
+    accent = "#c94343" if kind == "showerror" else "#3478f6"
+    symbol = "!" if kind == "showerror" else "i"
+    content = tk.Frame(dialog, bg="#ffffff", padx=22, pady=20)
+    content.pack(fill="both", expand=True)
+    tk.Label(content, text=symbol, bg=accent, fg="#ffffff", width=2,
+             font=("Arial", 13, "bold"), relief="flat").grid(row=0, column=0, sticky="n", padx=(0, 14))
+    tk.Label(content, text=str(message), bg="#ffffff", fg="#26384d", justify="left",
+             anchor="w", wraplength=340, font=("맑은 고딕", 10)).grid(row=0, column=1, sticky="nsew")
+    button = tk.Button(content, text="확인", command=dialog.destroy, bg="#2e486b", fg="#ffffff",
+                       activebackground="#213a5c", activeforeground="#ffffff", relief="flat",
+                       borderwidth=0, padx=20, pady=6, font=("맑은 고딕", 9, "bold"), cursor="hand2")
+    button.grid(row=1, column=1, sticky="e", pady=(20, 0))
+    content.columnconfigure(1, weight=1)
+
+    dialog.update_idletasks()
+    center_toplevel(dialog, parent, max(400, min(500, dialog.winfo_reqwidth())), max(150, dialog.winfo_reqheight()))
+    dialog.deiconify()
+    dialog.update_idletasks()
+    previous_grab = parent.grab_current()
+    dialog.bind("<Return>", lambda _event: dialog.destroy())
+    dialog.bind("<Escape>", lambda _event: dialog.destroy())
+    dialog.grab_set()
+    dialog.lift(parent)
+    button.focus_set()
+    try:
+        parent.wait_window(dialog)
+    finally:
+        if previous_grab is not None and previous_grab.winfo_exists():
+            previous_grab.grab_set()
+    return "ok"
+
+
 def app_dir():
     return Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
 
 
+def migrate_legacy_config(directory, legacy_name, current_name):
+    directory = Path(directory)
+    legacy_path = directory / legacy_name
+    current_path = directory / current_name
+    if legacy_path.exists() and not current_path.exists():
+        legacy_path.replace(current_path)
+    return current_path
+
+
 def resource_path(name):
-    if getattr(sys, "frozen", False):
-        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent)) / name
-    source_dir = Path(__file__).resolve().parent
-    asset_path = source_dir.parent / "assets" / name
-    return asset_path if asset_path.exists() else source_dir / name
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / name
 
 
 def read_mapping_file(path):
@@ -68,49 +177,425 @@ def natural_key(path):
     return [int(part) if part.isdigit() else part.casefold() for part in re.split(r"(\d+)", path.name)]
 
 
-def render_inline(text):
-    """Convert safe inline Markdown links and remote images."""
-    output = []
-    position = 0
-    for match in MARKDOWN_TOKEN.finditer(text):
-        output.append(html.escape(text[position:match.start()]))
-        if match.group(1) is not None:
-            alt = html.escape(match.group(1), quote=True)
-            url = html.escape(match.group(2), quote=True)
-            if match.group(3) and match.group(4):
-                width = min(4096, max(1, int(match.group(3))))
-                height = min(4096, max(1, int(match.group(4))))
-                output.append(
-                    f'<img src="{url}" alt="{alt}" width="{width}" height="{height}" '
-                    f'style="width:{width}px;height:{height}px;max-width:100%;object-fit:contain;">'
-                )
-            else:
-                output.append(f'<img src="{url}" alt="{alt}" style="max-width:100%;height:auto;">')
-        else:
-            label = html.escape(match.group(5))
-            url = html.escape(match.group(6), quote=True)
-            output.append(f'<a href="{url}" target="_blank" rel="noopener noreferrer">{label}</a>')
-        position = match.end()
-    output.append(html.escape(text[position:]))
-    return "".join(output)
+def parse_tags(value):
+    return [tag.strip() for tag in (value or "").split(",") if tag.strip()]
+
+
+def decode_preview_image(content, max_width, max_height):
+    with Image.open(io.BytesIO(content)) as source:
+        source.seek(0)
+        preview = source.convert("RGBA")
+    preview.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+    return preview
+
+
+def matching_image_dimension(value, source_dimension, opposite_dimension):
+    """Return the opposite image dimension while preserving the original ratio."""
+    value = int(value)
+    source_dimension = int(source_dimension)
+    opposite_dimension = int(opposite_dimension)
+    if value < 1 or source_dimension < 1 or opposite_dimension < 1:
+        raise ValueError("Image dimensions must be positive.")
+    return max(1, round(value * opposite_dimension / source_dimension))
+
+
+def extract_cf_html(data):
+    if not data:
+        return ""
+    for start_key, end_key in ((b"StartFragment:", b"EndFragment:"), (b"StartHTML:", b"EndHTML:")):
+        start_match = re.search(start_key + rb"\s*(\d+)", data)
+        end_match = re.search(end_key + rb"\s*(\d+)", data)
+        if start_match and end_match:
+            return data[int(start_match.group(1)):int(end_match.group(1))].decode("utf-8", "replace")
+    return data.decode("utf-8", "replace")
+
+
+class _ClipboardHtmlSanitizer(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True); self.output = []; self.anchor_open = False
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() == "a":
+            href = normalize_url_prefix(dict(attrs).get("href", ""))
+            if re.fullmatch(r"https?://\S+", href, re.IGNORECASE):
+                self.output.append(f'<a href="{html.escape(href, quote=True)}" target="_blank">'); self.anchor_open = True
+        elif tag.lower() == "br": self.output.append("<br>")
+    def handle_endtag(self, tag):
+        if tag.lower() == "a" and self.anchor_open: self.output.append("</a>"); self.anchor_open = False
+        elif tag.lower() in {"p", "div"}: self.output.append("<br>")
+    def handle_data(self, data): self.output.append(html.escape(data))
+
+
+def sanitize_clipboard_html(source):
+    parser = _ClipboardHtmlSanitizer(); parser.feed(source or "")
+    if parser.anchor_open: parser.output.append("</a>")
+    return "".join(parser.output)
+
+
+def get_windows_clipboard_html():
+    if sys.platform != "win32": return ""
+    user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+    user32.GetClipboardData.restype = ctypes.c_void_p
+    fmt = user32.RegisterClipboardFormatW("HTML Format")
+    if not user32.OpenClipboard(None): return ""
+    try:
+        handle = user32.GetClipboardData(fmt)
+        if not handle: return ""
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        pointer = kernel32.GlobalLock(handle)
+        if not pointer: return ""
+        try: data = ctypes.string_at(pointer, kernel32.GlobalSize(handle))
+        finally: kernel32.GlobalUnlock(handle)
+        return extract_cf_html(data.rstrip(b"\0"))
+    finally: user32.CloseClipboard()
 
 
 def render_content(text):
-    """Convert safe Markdown-style links/rules and preserve line breaks."""
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = normalized.split("\n")
-    rendered = []
-    for index, line in enumerate(lines):
-        is_rule = line.strip() == "---"
-        rendered.append("<hr>" if is_rule else render_inline(line))
-        if index == len(lines) - 1:
-            continue
-        next_is_rule = lines[index + 1].strip() == "---"
-        # <hr> is already a block separator. Do not add an extra <br>
-        # immediately before or after it; explicit blank lines still survive.
-        if not is_rule and not next_is_rule:
-            rendered.append("<br>")
-    return "".join(rendered)
+    """Escape legacy plain text without interpreting Markdown syntax."""
+    normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    return html.escape(normalized).replace("\n", "<br>")
+
+
+def editor_initial_html(content):
+    content = (content or "").strip()
+    if re.search(r"<(?:p|div|br|hr|a|img)\b", content, re.IGNORECASE):
+        return content
+    return render_content(content)
+
+
+class WysiwygEditor(tk.Frame):
+    def __init__(self, parent, initial_html="", height=150):
+        super().__init__(parent, bg="#c7d0dd", height=height)
+        self.pack_propagate(False)
+        self.initial_html = editor_initial_html(initial_html)
+        self.links = {}
+        self.embeds = {}
+        self.images = []
+        self.image_data = {}
+        self.counter = 0
+        self.html_mode = False
+        self.text = tk.Text(
+            self, wrap="word", relief="flat", borderwidth=0, highlightthickness=0,
+            font=("맑은 고딕", 10), fg="#26384f", bg="#fbfcfe",
+            insertbackground="#26384f", padx=9, pady=8, undo=True,
+        )
+        self.text.pack(fill="both", expand=True, padx=1, pady=1)
+        self.text.bind("<<Paste>>", self._paste_rich_html, add="+")
+        self.insert_html(self.initial_html)
+
+    def _paste_rich_html(self, _event=None):
+        source = get_windows_clipboard_html()
+        if not source: return None
+        markup = sanitize_clipboard_html(source)
+        if "<a " not in markup: return None
+        self.insert_html(markup); return "break"
+
+    def _attributes(self, source):
+        return {key.lower(): html.unescape(value) for key, _, value in re.findall(r"([\w-]+)\s*=\s*(['\"])(.*?)\2", source)}
+
+    def _insert_link(self, label, url):
+        self.counter += 1
+        tag = f"wysiwyg_link_{self.counter}"
+        self.links[tag] = url
+        self.text.tag_configure(tag, foreground="#2878db", underline=True)
+        self.text.tag_bind(tag, "<Button-3>", lambda event, link_tag=tag: self._show_link_menu(link_tag, event))
+        self.text.insert("insert", html.unescape(re.sub(r"<[^>]+>", "", label)), (tag,))
+
+    def _show_link_menu(self, tag, event):
+        menu = tk.Menu(
+            self, tearoff=False, bg="#ffffff", fg="#26384d",
+            activebackground="#2e486b", activeforeground="#ffffff",
+            relief="flat", borderwidth=1, font=("맑은 고딕", 9),
+        )
+        menu.add_command(label="링크 수정", command=lambda: self._open_link_edit(tag))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    def _open_link_edit(self, tag):
+        ranges = self.text.tag_ranges(tag)
+        if len(ranges) < 2 or tag not in self.links:
+            return
+        start_index, end_index = str(ranges[0]), str(ranges[1])
+        dialog = tk.Toplevel(self.winfo_toplevel())
+        dialog.withdraw()
+        dialog.title("링크 수정")
+        dialog.transient(self.winfo_toplevel())
+        dialog.resizable(False, False)
+        dialog.configure(bg="#ffffff")
+        body = ttk.Frame(dialog, padding=18, style="Card.TFrame")
+        body.pack(fill="both", expand=True)
+        text_var = tk.StringVar(value=self.text.get(start_index, end_index))
+        url_var = tk.StringVar(value=self.links[tag])
+        first_entry = None
+        for row, (title, variable) in enumerate((("표시 텍스트", text_var), ("링크", url_var))):
+            ttk.Label(body, text=title, style="Card.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 12), pady=6)
+            entry = ttk.Entry(body, textvariable=variable, width=48)
+            entry.grid(row=row, column=1, sticky="ew", pady=6)
+            if first_entry is None:
+                first_entry = entry
+        body.columnconfigure(1, weight=1)
+
+        def apply_link():
+            try:
+                cleaned_url = normalize_url_prefix(url_var.get())
+                build_content_syntax("link", text=text_var.get(), url=cleaned_url)
+            except ValueError as exc:
+                centered_messagebox(dialog, "showerror", "링크 수정", str(exc))
+                return
+            new_text = text_var.get().strip()
+            self.links[tag] = cleaned_url
+            self.text.delete(start_index, end_index)
+            self.text.insert(start_index, new_text, (tag,))
+            dialog.destroy()
+
+        buttons = ttk.Frame(body, style="Card.TFrame")
+        buttons.grid(row=2, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(buttons, text="취소", command=dialog.destroy, style="Soft.TButton").pack(side="left")
+        ttk.Button(buttons, text="확인", command=apply_link, style="Navy.TButton").pack(side="left", padx=(8, 0))
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.bind("<Return>", lambda _event: apply_link())
+        dialog.update_idletasks()
+        center_toplevel(dialog, self.winfo_toplevel(), 540, 190)
+        dialog.deiconify()
+        dialog.grab_set()
+        first_entry.focus_set()
+        first_entry.selection_range(0, "end")
+
+    def _insert_rule(self):
+        rule = tk.Frame(self.text, bg="#aeb9c7", height=1, width=620)
+        self.text.window_create("insert", window=rule, pady=8)
+        self.embeds[str(rule)] = "<hr>"
+
+    def _insert_image(self, source):
+        attrs = self._attributes(source)
+        src = attrs.get("src", "")
+        alt = attrs.get("alt", "이미지")
+        width = int(attrs["width"]) if attrs.get("width", "").isdigit() else None
+        height = int(attrs["height"]) if attrs.get("height", "").isdigit() else None
+        label = tk.Label(self.text, text=f"이미지: {alt}\n{src}", bg="#edf2f8", fg="#53657a", padx=10, pady=8)
+        try:
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36"}
+            if "dcinside.com" in src:
+                headers["Referer"] = "https://gall.dcinside.com/"
+            response = requests.get(src, timeout=8, headers=headers)
+            response.raise_for_status()
+            max_width = width or 560
+            max_height = height or 140
+            preview = decode_preview_image(response.content, max_width, max_height)
+            photo = ImageTk.PhotoImage(preview, master=self.text)
+            self.images.append(photo)
+            label.configure(image=photo, text="")
+        except Exception:
+            pass
+        self.text.window_create("insert", window=label, pady=6)
+        escaped_src = html.escape(src, quote=True)
+        escaped_alt = html.escape(alt, quote=True)
+        size = (f' width="{width}"' if width else "") + (f' height="{height}"' if height else "")
+        self.embeds[str(label)] = f'<img src="{escaped_src}" alt="{escaped_alt}"{size}>'
+        self.image_data[str(label)] = {"src": src, "alt": alt, "width": width, "height": height}
+        label.bind("<Button-3>", lambda event, widget=label: self._show_image_menu(widget, event))
+
+    def _show_image_menu(self, label, event):
+        menu = tk.Menu(self, tearoff=False, bg="#ffffff", fg="#26384d", activebackground="#2e486b", activeforeground="#ffffff", relief="flat", borderwidth=1, font=("맑은 고딕", 9))
+        menu.add_command(label="이미지 수정", command=lambda: self._open_image_resize(label))
+        try: menu.tk_popup(event.x_root, event.y_root)
+        finally: menu.grab_release()
+
+    def _open_image_resize(self, label):
+        data = self.image_data.get(str(label))
+        if not data: return
+        dialog = tk.Toplevel(self.winfo_toplevel()); dialog.withdraw(); dialog.title("이미지 수정"); dialog.transient(self.winfo_toplevel()); dialog.resizable(False, False); dialog.configure(bg="#ffffff")
+        body = ttk.Frame(dialog, padding=18, style="Card.TFrame"); body.pack(fill="both", expand=True)
+        alt_var = tk.StringVar(value=data.get("alt", "")); url_var = tk.StringVar(value=data.get("src", ""))
+        width_var = tk.StringVar(value=str(data.get("width") or ""))
+        height_var = tk.StringVar(value=str(data.get("height") or ""))
+        keep_ratio_var = tk.BooleanVar(value=False)
+        for row, (title, variable) in enumerate((("설명 텍스트", alt_var), ("이미지 URL", url_var))):
+            ttk.Label(body, text=title, style="Card.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 10), pady=6); ttk.Entry(body, textvariable=variable, width=48).grid(row=row, column=1, columnspan=3, sticky="ew", pady=6)
+        ratio_check = tk.Checkbutton(
+            body, text="원본 비율 맞춤", variable=keep_ratio_var,
+            bg="#ffffff", fg="#26384d", activebackground="#ffffff", activeforeground="#26384d",
+            selectcolor="#ffffff", highlightthickness=0, borderwidth=0, relief="flat",
+            font=("맑은 고딕", 9),
+        )
+        ratio_check.grid(row=2, column=0, sticky="w", padx=(0, 10), pady=6)
+        size_fields = ttk.Frame(body, style="Card.TFrame")
+        size_fields.grid(row=2, column=1, columnspan=3, sticky="ew", pady=6)
+        for column, (title, variable) in enumerate((("가로", width_var), ("세로", height_var))):
+            field = ttk.Frame(size_fields, style="Card.TFrame")
+            field.grid(row=0, column=column, sticky="ew", padx=((0, 9) if column == 0 else (9, 0)))
+            field.columnconfigure(1, weight=1)
+            ttk.Label(field, text=title, style="Card.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
+            ttk.Entry(field, textvariable=variable, width=16).grid(row=0, column=1, sticky="ew")
+            size_fields.columnconfigure(column, weight=1, uniform="image_size")
+        preview_frame = tk.Frame(body, bg="#edf2f8", width=520, height=270, relief="flat")
+        preview_frame.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(10, 4)); preview_frame.grid_propagate(False)
+        preview_box = tk.Canvas(preview_frame, width=520, height=270, bg="#edf2f8", highlightthickness=0)
+        preview_box.pack(fill="both", expand=True)
+        preview_box.create_text(260, 135, text="이미지를 불러오는 중...", fill="#53657a")
+        preview_status = ttk.Label(body, text="", style="Hint.TLabel", anchor="center")
+        preview_status.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(0, 6))
+        preview_refs = []
+        preview_cache = {"url": None, "image": None}
+        preview_after_id = [None]
+        ratio_update_guard = [False]
+        def load_preview(show_error=True):
+            try:
+                url = normalize_url_prefix(url_var.get())
+                if preview_cache["url"] != url or preview_cache["image"] is None:
+                    headers = {"User-Agent": "Mozilla/5.0"}
+                    if "dcinside.com" in url: headers["Referer"] = "https://gall.dcinside.com/"
+                    response = requests.get(url, timeout=8, headers=headers); response.raise_for_status()
+                    with Image.open(io.BytesIO(response.content)) as source:
+                        source.seek(0); original = source.convert("RGBA")
+                    preview_cache.update(url=url, image=original)
+                else:
+                    original = preview_cache["image"]
+                width_text, height_text = width_var.get().strip(), height_var.get().strip()
+                width = int(width_text) if width_text else None
+                height = int(height_text) if height_text else None
+                if any(value is not None and not 1 <= value <= 4096 for value in (width, height)):
+                    raise ValueError("크기는 1~4096 사이여야 합니다.")
+                if width is None and height is None:
+                    target_width, target_height = original.size
+                else:
+                    target_width = width if width is not None else round(original.width * height / original.height)
+                    target_height = height if height is not None else round(original.height * width / original.width)
+                preview = original.resize((target_width, target_height), Image.Resampling.LANCZOS)
+                scale = min(1.0, 500 / target_width, 250 / target_height)
+                shown_width = max(1, round(target_width * scale)); shown_height = max(1, round(target_height * scale))
+                if (shown_width, shown_height) != preview.size:
+                    preview = preview.resize((shown_width, shown_height), Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(preview, master=self.text)
+                preview_refs[:] = [photo]
+                preview_box.delete("all")
+                preview_box.create_rectangle(0, 0, 520, 270, fill="#edf2f8", outline="")
+                preview_box.create_image(260, 135, image=photo, anchor="center")
+                preview_box.create_rectangle(260 - shown_width / 2, 135 - shown_height / 2, 260 + shown_width / 2, 135 + shown_height / 2, outline="#c4cedb")
+                preview_status.configure(text=f"원본 {original.width}×{original.height}  ·  적용 {target_width}×{target_height}  ·  미리보기 {round(scale * 100)}%")
+                if url_var.get() != url:
+                    url_var.set(url)
+                return photo, width, height
+            except Exception as exc:
+                if show_error: centered_messagebox(dialog, "showerror", "이미지 수정", f"이미지 미리보기를 불러오지 못했습니다.\n{exc}")
+                return None
+        def run_scheduled_preview():
+            preview_after_id[0] = None
+            load_preview(False)
+        def schedule_preview(*_args):
+            if preview_after_id[0] is not None:
+                dialog.after_cancel(preview_after_id[0])
+            preview_after_id[0] = dialog.after(450, run_scheduled_preview)
+        def sync_ratio(changed_axis):
+            if ratio_update_guard[0] or not keep_ratio_var.get():
+                return
+            if preview_cache["image"] is None or preview_cache["url"] != normalize_url_prefix(url_var.get()):
+                if not load_preview(False):
+                    return
+            original = preview_cache["image"]
+            try:
+                source_var = width_var if changed_axis == "width" else height_var
+                value_text = source_var.get().strip()
+                if not value_text:
+                    return
+                value = int(value_text)
+                if not 1 <= value <= 4096:
+                    return
+                ratio_update_guard[0] = True
+                if changed_axis == "width":
+                    height_var.set(str(matching_image_dimension(value, original.width, original.height)))
+                else:
+                    width_var.set(str(matching_image_dimension(value, original.height, original.width)))
+            finally:
+                ratio_update_guard[0] = False
+        def enable_ratio():
+            if not keep_ratio_var.get():
+                return
+            sync_ratio("width" if width_var.get().strip() else "height")
+        def apply_size():
+            result = load_preview()
+            if not result: return
+            photo, width, height = result; data.update(src=url_var.get(), alt=alt_var.get().strip(), width=width, height=height)
+            escaped_src, escaped_alt = html.escape(data["src"], quote=True), html.escape(data["alt"], quote=True)
+            size = (f' width="{width}"' if width else "") + (f' height="{height}"' if height else "")
+            self.embeds[str(label)] = f'<img src="{escaped_src}" alt="{escaped_alt}"{size}>'
+            self.images.append(photo); label.configure(image=photo, text="")
+            dialog.destroy()
+        url_var.trace_add("write", schedule_preview)
+        width_var.trace_add("write", lambda *_args: (sync_ratio("width"), schedule_preview()))
+        height_var.trace_add("write", lambda *_args: (sync_ratio("height"), schedule_preview()))
+        ratio_check.configure(command=enable_ratio)
+        buttons = ttk.Frame(body, style="Card.TFrame"); buttons.grid(row=5, column=0, columnspan=4, sticky="e", pady=(8, 0))
+        ttk.Button(buttons, text="취소", command=dialog.destroy, style="Soft.TButton").pack(side="left", padx=8); ttk.Button(buttons, text="확인", command=apply_size, style="Navy.TButton").pack(side="left")
+        dialog.update_idletasks(); center_toplevel(dialog, self.winfo_toplevel(), 600, 560); dialog.deiconify(); dialog.grab_set(); dialog.after(50, lambda: load_preview(False))
+
+    def get_html(self):
+        if self.html_mode:
+            return self.text.get("1.0", "end-1c")
+        output = []
+        active_link = None
+        for event, value, _index in self.text.dump("1.0", "end-1c", text=True, tag=True, window=True):
+            if event == "tagon" and value in self.links:
+                active_link = value
+                output.append(f'<a href="{html.escape(self.links[value], quote=True)}" target="_blank">')
+            elif event == "tagoff" and value == active_link:
+                output.append("</a>")
+                active_link = None
+            elif event == "window":
+                output.append(self.embeds.get(value, ""))
+            elif event == "text":
+                output.append(html.escape(value).replace("\n", "<br>"))
+        if active_link:
+            output.append("</a>")
+        return "".join(output)
+
+    def insert_html(self, value):
+        if self.html_mode:
+            self.text.insert("insert", value)
+            return
+        pattern = re.compile(r"(<br\s*/?>|<hr\s*/?>|<a\b[^>]*>.*?</a>|<img\b[^>]*>)", re.IGNORECASE | re.DOTALL)
+        for part in pattern.split(value or ""):
+            if not part:
+                continue
+            lower = part.lower()
+            if lower.startswith("<br"):
+                self.text.insert("insert", "\n")
+            elif lower.startswith("<hr"):
+                self._insert_rule()
+            elif lower.startswith("<a"):
+                opening, label = part.split(">", 1)
+                self._insert_link(label.rsplit("</a", 1)[0], self._attributes(opening).get("href", ""))
+            elif lower.startswith("<img"):
+                self._insert_image(part)
+            else:
+                cleaned = re.sub(r"</?(?:p|div)[^>]*>", "\n", part, flags=re.IGNORECASE)
+                cleaned = html.unescape(re.sub(r"<[^>]+>", "", cleaned))
+                self.text.insert("insert", cleaned.lstrip("\n") if self.text.index("insert") == "1.0" else cleaned)
+
+    def focus_editor(self):
+        self.text.focus_set()
+
+    def set_html_mode(self, enabled):
+        enabled = bool(enabled)
+        if enabled == self.html_mode:
+            return
+        if enabled:
+            source = self.get_html()
+            self.text.delete("1.0", "end")
+            self.text.insert("1.0", source)
+            self.html_mode = True
+        else:
+            source = self.text.get("1.0", "end-1c")
+            self.text.delete("1.0", "end")
+            self.links.clear()
+            self.embeds.clear()
+            self.images.clear()
+            self.image_data.clear()
+            self.html_mode = False
+            self.insert_html(source)
+        self.focus_editor()
 
 
 def collect_files(folder, mode="name"):
@@ -125,6 +610,10 @@ def collect_files(folder, mode="name"):
 
     if mode == "name":
         return sorted(images, key=natural_key), []
+    if mode == "name_desc":
+        return sorted(images, key=natural_key, reverse=True), []
+    if mode in {"mtime", "mtime_desc"}:
+        return sorted(images, key=lambda path: (path.stat().st_mtime_ns, natural_key(path)), reverse=mode == "mtime_desc"), []
 
     found = {}
     ignored = []
@@ -227,19 +716,160 @@ class Tooltip:
             self.window = None
 
 
+class TagBadgeInput(tk.Frame):
+    def __init__(self, parent, variable):
+        super().__init__(parent, bg="#ffffff", highlightbackground="#aab4c0", highlightcolor="#3478f6", highlightthickness=1)
+        self.variable = variable
+        self.tags = []
+        self._pointer_reset_count = 0
+        self._handling_input_change = False
+        self.badge_frame = tk.Frame(self, bg="#ffffff")
+        badge_min_height = tkfont.Font(root=self, family="맑은 고딕", size=9, weight="bold").metrics("linespace") + 10
+        self.height_spacer = tk.Frame(self, bg="#ffffff", width=1, height=badge_min_height)
+        self.height_spacer.pack(side="left", pady=4)
+        self.height_spacer.pack_propagate(False)
+        self.input_var = tk.StringVar()
+        self.entry = tk.Entry(
+            self, textvariable=self.input_var, relief="flat", borderwidth=0, highlightthickness=0,
+            bg="#ffffff", fg="#26384d", insertbackground="#26384d", font=("맑은 고딕", 10),
+        )
+        self.entry.pack(side="left", fill="x", expand=True, padx=6, pady=5)
+        self.entry.bind("<Return>", self.commit_event)
+        self.entry.bind("<BackSpace>", self.remove_last_if_empty)
+        self.entry.bind("<KeyRelease>", self.sync_variable)
+        self.input_var.trace_add("write", self.handle_input_change)
+        self.bind("<Button-1>", lambda _event: self.restore_cursor(), add="+")
+        self.badge_frame.bind("<Button-1>", lambda _event: self.restore_cursor(), add="+")
+        for tag in parse_tags(variable.get()):
+            self.add_badge(tag, sync=False)
+        self.sync_variable()
+
+    def add_badge(self, tag, sync=True):
+        tag = tag.strip()
+        if not tag:
+            return
+        if tag in self.tags:
+            self.input_var.set("")
+            self.sync_variable()
+            return
+        first_badge = not self.tags
+        self.tags.append(tag)
+        if first_badge:
+            self.badge_frame.pack(side="left", before=self.entry, padx=(6, 0), pady=4)
+        badge = tk.Frame(self.badge_frame, bg="#707070", relief="flat", cursor="hand2")
+        badge.pack(side="left", padx=(0, 5))
+        tag_label = tk.Label(
+            badge, text=tag, bg="#707070", fg="#ffffff",
+            font=("맑은 고딕", 9, "bold"), padx=0, pady=3, cursor="hand2",
+        )
+        tag_label.pack(side="left", padx=(7, 2))
+        close_label = tk.Label(
+            badge, text="X", bg="#707070", fg="#ffffff",
+            font=("맑은 고딕", 9, "bold"), padx=0, pady=3, cursor="hand2",
+        )
+        close_label.pack(side="right", padx=(0, 7))
+        for target in (badge, tag_label, close_label):
+            target.bind("<ButtonRelease-1>", lambda _event, value=tag, widget=badge: self.remove_badge(value, widget))
+        if sync:
+            self.sync_variable()
+
+    def remove_badge(self, tag, widget):
+        if tag in self.tags:
+            self.tags.remove(tag)
+        widget.configure(cursor="arrow")
+        widget.destroy()
+        if not self.tags:
+            self.badge_frame.pack_forget()
+        self.sync_variable()
+        self.restore_mouse_cursor()
+        self.restore_cursor()
+
+    def commit_event(self, _event=None):
+        self.add_badge(self.input_var.get())
+        self.input_var.set("")
+        self.sync_variable()
+        self.restore_cursor()
+        return "break"
+
+    def handle_input_change(self, *_args):
+        if self._handling_input_change:
+            return
+        value = self.input_var.get()
+        if "," not in value:
+            self.sync_variable()
+            return
+        parts = value.split(",")
+        self._handling_input_change = True
+        try:
+            for tag in parts[:-1]:
+                self.add_badge(tag)
+            self.input_var.set(parts[-1])
+            self.sync_variable()
+            self.restore_cursor()
+        finally:
+            self._handling_input_change = False
+
+    def remove_last_if_empty(self, _event=None):
+        if self.input_var.get() or not self.tags:
+            return None
+        children = self.badge_frame.winfo_children()
+        if children:
+            children[-1].destroy()
+        self.tags.pop()
+        if not self.tags:
+            self.badge_frame.pack_forget()
+        self.sync_variable()
+        self.restore_cursor()
+        return "break"
+
+    def sync_variable(self, _event=None):
+        values = list(self.tags)
+        pending = self.input_var.get().strip()
+        if pending:
+            values.append(pending)
+        self.variable.set(",".join(values))
+
+    def focus_set(self):
+        self.restore_cursor()
+
+    def restore_cursor(self):
+        def apply_focus():
+            if self.entry.winfo_exists():
+                self.entry.focus_set()
+                self.entry.icursor("end")
+                self.entry.xview_moveto(1.0)
+        self.after_idle(apply_focus)
+
+    def restore_mouse_cursor(self):
+        self._pointer_reset_count += 1
+        top = self.winfo_toplevel()
+        top.configure(cursor="arrow")
+
+        def release_override():
+            if not top.winfo_exists():
+                return
+            top.configure(cursor="")
+            target = top.winfo_containing(top.winfo_pointerx(), top.winfo_pointery())
+            if target is not None and target.winfo_exists():
+                target.event_generate("<Motion>", x=0, y=0)
+
+        top.after(30, release_override)
+
+
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title(f"{BRAND_TITLE} - {APP_TITLE}")
+        self.root.title(f"{BRAND_TITLE} v{APP_VERSION} - {APP_TITLE}")
         self.root.geometry("760x680")
         self.root.minsize(680, 600)
-        self.settings_path = app_dir() / "dogcon-uploader-settings.json"
-        self.mapping_path = app_dir() / "dogcon-uploader.ini"
-        self.profile_path = app_dir() / "dogcon-browser-profile"
+        config_dir = app_dir()
+        self.settings_path = migrate_legacy_config(config_dir, LEGACY_SETTINGS_FILENAME, SETTINGS_FILENAME)
+        self.mapping_path = migrate_legacy_config(config_dir, LEGACY_MAPPING_FILENAME, MAPPING_FILENAME)
+        self.profile_path = migrate_legacy_config(config_dir, LEGACY_PROFILE_DIRECTORY, PROFILE_DIRECTORY)
         self.mapping = self.load_mapping()
         self.folder = tk.StringVar()
         self.url = tk.StringVar(value=DEFAULT_URL)
-        self.sort_mode = tk.StringVar(value="파일 이름순")
+        self.sort_mode = tk.StringVar(value="파일 이름")
         self.tags = tk.StringVar()
         self.post_title = tk.StringVar()
         self.price = tk.StringVar()
@@ -269,6 +899,8 @@ class App:
         style.map("Navy.TButton", background=[("active", "#213a5c")])
         style.configure("Soft.TButton", background="#eef2f7", foreground=navy, borderwidth=0, padding=(12, 9))
         style.map("Soft.TButton", background=[("active", "#dfe7f1")])
+        style.configure("Editor.TButton", background="#eef2f7", foreground=navy, borderwidth=0, padding=(8, 3), font=("맑은 고딕", 9))
+        style.map("Editor.TButton", background=[("active", "#dfe7f1"), ("pressed", "#d4dde8")])
         style.configure("TEntry", padding=7)
         style.configure("TCombobox", padding=6)
         style.layout(
@@ -332,14 +964,21 @@ class App:
         except tk.TclError:
             self.brand_logo = None
             tk.Label(header_inner, text=BRAND_TITLE, bg=navy, fg=white, font=("Consolas", 19, "bold")).pack(side="left")
-        guide_area = tk.Frame(header_inner, bg=navy, cursor="hand2")
-        guide_area.pack(side="right")
-        guide_text = tk.Label(guide_area, text="Guide", bg=navy, fg="#d9e5f5", font=("맑은 고딕", 10, "bold"), cursor="hand2")
+        header_tools = tk.Frame(header_inner, bg=navy)
+        header_tools.pack(side="right")
+        guide_area = tk.Frame(header_tools, bg=navy, cursor="hand2")
+        guide_area.pack(side="left")
+        guide_text = tk.Label(guide_area, text="Guide", bg=navy, fg="#d9e5f5", font=("맑은 고딕", -16, "bold"), cursor="hand2")
         guide_text.pack(side="left", padx=(0, 6))
         guide_icon = tk.Canvas(guide_area, width=20, height=20, bg=navy, highlightthickness=0, cursor="hand2")
         guide_icon.create_oval(1, 1, 19, 19, outline="#d9e5f5", width=1)
         guide_icon.create_text(10, 10, text="!", fill="#d9e5f5", font=("맑은 고딕", 9, "bold"))
         guide_icon.pack(side="left")
+        tk.Label(header_tools, text="|", bg=navy, fg="#738aa8", font=("맑은 고딕", -16)).pack(side="left", padx=10)
+        self.version_label = tk.Label(
+            header_tools, text=f"v{APP_VERSION}", bg=navy, fg="#d9e5f5", font=("맑은 고딕", -16)
+        )
+        self.version_label.pack(side="left")
         for guide_widget in (guide_area, guide_text, guide_icon):
             guide_widget.bind("<Button-1>", lambda _event: self.show_guide())
 
@@ -389,50 +1028,80 @@ class App:
         sort_row = ttk.Frame(card, style="Card.TFrame")
         sort_row.pack(fill="x", pady=(0, 18))
         ttk.Label(sort_row, text="배치 순서", style="Card.TLabel").pack(side="left")
-        sort_box = ttk.Combobox(sort_row, textvariable=self.sort_mode, values=("파일 이름순", "숫자 파일명 (1~50)"), state="readonly", width=22, style="Order.TCombobox")
+        sort_box = ttk.Combobox(sort_row, textvariable=self.sort_mode, values=tuple(SORT_OPTIONS), state="readonly", width=22, style="Order.TCombobox")
         sort_box.pack(side="left", padx=(10, 12))
         sort_box.bind("<<ComboboxSelected>>", lambda _event: self.preview())
         ttk.Label(sort_row, text="첫 번째 파일이 메인 이미지가 됩니다.", style="Hint.TLabel").pack(side="left")
 
         ttk.Separator(card).pack(fill="x", pady=(0, 18))
-        ttk.Label(card, text="2  게시글 정보", style="Section.TLabel").pack(anchor="w")
+        ttk.Label(card, text="2  게시글 정보 (선택)", style="Section.TLabel").pack(anchor="w")
         ttk.Label(card, text="개드립콘 등록 페이지 주소", style="Card.TLabel").pack(anchor="w", pady=(10, 0))
-        ttk.Entry(card, textvariable=self.url).pack(fill="x", pady=(5, 10))
+        url_row = ttk.Frame(card, style="Card.TFrame")
+        url_row.pack(fill="x", pady=(5, 12))
+        ttk.Entry(url_row, textvariable=self.url).pack(side="left", fill="x", expand=True)
+        default_page_button = ttk.Button(url_row, text="기본 페이지", command=self.reset_default_url, style="Soft.TButton")
+        default_page_button.pack(side="left", padx=(10, 0))
         info_row = ttk.Frame(card, style="Card.TFrame")
-        info_row.pack(fill="x", pady=(0, 10))
+        info_row.pack(fill="x", pady=(0, 12))
         title_box = ttk.Frame(info_row, style="Card.TFrame")
         title_box.pack(side="left", fill="x", expand=True)
-        ttk.Label(title_box, text="게시글 제목 (선택 사항)", style="Card.TLabel").pack(anchor="w")
+        ttk.Label(title_box, text="게시글 제목", style="Card.TLabel").pack(anchor="w")
         ttk.Entry(title_box, textvariable=self.post_title).pack(fill="x", pady=(5, 0))
         price_box = ttk.Frame(info_row, style="Card.TFrame")
         price_box.pack(side="left", padx=(12, 0))
         ttk.Label(price_box, text="판매 포인트", style="Card.TLabel").pack(anchor="w")
-        ttk.Entry(price_box, textvariable=self.price, width=14).pack(pady=(5, 0))
+        price_entry_box = ttk.Frame(
+            price_box,
+            style="Card.TFrame",
+            width=default_page_button.winfo_reqwidth(),
+            height=default_page_button.winfo_reqheight(),
+        )
+        price_entry_box.pack(pady=(5, 0))
+        price_entry_box.pack_propagate(False)
+        ttk.Entry(price_entry_box, textvariable=self.price).pack(fill="both", expand=True)
         content_label_row = ttk.Frame(card, style="Card.TFrame")
         content_label_row.pack(fill="x")
-        ttk.Label(content_label_row, text="게시글 내용 (선택 사항)", style="Card.TLabel").pack(side="left")
-        help_icon = tk.Canvas(content_label_row, width=18, height=18, bg=white, highlightthickness=0, cursor="question_arrow")
-        help_icon.create_oval(1, 1, 17, 17, fill=navy, outline=navy)
-        help_icon.create_text(9, 9, text="!", fill="white", font=("맑은 고딕", 8, "bold"))
-        help_icon.pack(side="left", padx=(7, 0))
-        self.content_tooltip = Tooltip(
-            help_icon,
-            "게시글 내용 문법\n\n"
-            "링크: [표시할 텍스트](https://example.com)\n"
-            "가로줄: 별도의 한 줄에 ---\n"
-            "이미지: ![대체 텍스트](https://example.com/image.png)\n\n"
-            "이미지 크기: ![대체 텍스트](URL){가로, 세로}\n"
-            "예시: ![샘플](https://example.com/a.png){320, 200}\n\n"
-            "이미지는 HTTP/HTTPS URL만 지원합니다.\n"
-            "PC의 로컬 파일 경로는 개드립 에디터에서 직접 첨부해 주세요.",
-        )
-        self.content_text = tk.Text(card, height=6, wrap="word", relief="solid", borderwidth=1, highlightthickness=0, font=("맑은 고딕", 10), fg=text, bg="#fbfcfe", insertbackground=text, padx=9, pady=8)
-        self.content_text.pack(fill="x", pady=(5, 4))
-        if self.saved_content:
-            self.content_text.insert("1.0", self.saved_content)
-        ttk.Label(card, text="링크·가로줄·이미지 문법은 제목 옆 ! 아이콘에서 확인할 수 있습니다.", style="Hint.TLabel").pack(anchor="w", pady=(0, 10))
-        ttk.Label(card, text="태그 (선택 사항, 쉼표로 구분)", style="Card.TLabel").pack(anchor="w")
-        ttk.Entry(card, textvariable=self.tags).pack(fill="x", pady=(5, 18))
+        ttk.Label(content_label_row, text="게시글 내용", style="Card.TLabel").pack(side="left")
+        editor_toolbar = ttk.Frame(content_label_row, style="Card.TFrame")
+        editor_toolbar.pack(side="left", padx=(12, 0))
+        for label, syntax in (
+            ("링크", "link"),
+            ("가로줄", "rule"),
+            ("이미지", "image"),
+        ):
+            toolbar_button = ttk.Button(
+                editor_toolbar,
+                text=label,
+                style="Editor.TButton",
+            )
+            toolbar_button.configure(
+                command=lambda kind=syntax, anchor=toolbar_button: self.insert_content_syntax(kind, anchor)
+            )
+            toolbar_button.pack(side="left", padx=(0, 5))
+        self.html_view = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            content_label_row,
+            text="HTML",
+            variable=self.html_view,
+            command=self.toggle_html_view,
+            bg=white,
+            fg=navy,
+            activebackground=white,
+            activeforeground=navy,
+            selectcolor=white,
+            highlightthickness=0,
+            borderwidth=0,
+            relief="flat",
+            font=("맑은 고딕", 9),
+            padx=8,
+            pady=3,
+            cursor="hand2",
+        ).pack(side="right")
+        self.content_editor = WysiwygEditor(card, self.saved_content, height=150)
+        self.content_editor.pack(fill="x", pady=(5, 10))
+        ttk.Label(card, text="태그 (쉼표로 구분)", style="Card.TLabel").pack(anchor="w")
+        self.tag_input = TagBadgeInput(card, self.tags)
+        self.tag_input.pack(fill="x", pady=(5, 18))
 
         ttk.Separator(card).pack(fill="x", pady=(0, 18))
         ttk.Label(card, text="3  기능 및 로그", style="Section.TLabel").pack(anchor="w")
@@ -562,14 +1231,9 @@ class App:
         dialog.geometry("680x590")
         dialog.minsize(600, 520)
         dialog.transient(self.root)
-        dialog.grab_set()
+        dialog.lift()
         dialog.configure(bg="#e8ebef")
-        dialog.update_idletasks()
-        popup_width = dialog.winfo_width()
-        popup_height = dialog.winfo_height()
-        popup_x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - popup_width) // 2)
-        popup_y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - popup_height) // 2)
-        dialog.geometry(f"{popup_width}x{popup_height}+{popup_x}+{popup_y}")
+        center_toplevel(dialog, self.root, 680, 590)
 
         header = tk.Frame(dialog, bg=navy, padx=24, pady=14)
         header.pack(fill="x")
@@ -590,7 +1254,7 @@ class App:
                 "1",
                 "업로드 이미지 선택",
                 "• 이미지가 들어 있는 폴더를 선택합니다.\n"
-                "• 파일 이름순 또는 숫자 파일명 순서를 선택합니다.\n"
+                "• 파일 이름 또는 수정된 날짜 기준의 배치 순서를 선택합니다.\n"
                 "• ‘폴더 검사’에서 파일별 배치 위치를 확인합니다.\n"
                 "• 첫 번째 파일은 개드립콘 메인 이미지가 됩니다.",
             ),
@@ -600,7 +1264,7 @@ class App:
                 "• 게시글 제목, 판매 포인트, 본문과 태그를 입력합니다.\n"
                 "• 본문은 링크, 가로줄, 원격 이미지 문법을 지원합니다.\n"
                 "• 제목이나 포인트 등을 비워두면 해당 페이지 값은 변경하지 않습니다.\n"
-                "• 본문 제목 옆 ! 아이콘에서 문법 도움말을 볼 수 있습니다.",
+                "• 본문 상단의 링크·가로줄·이미지 버튼을 사용할 수 있습니다.",
             ),
             (
                 "3",
@@ -647,6 +1311,7 @@ class App:
         dialog.geometry("700x560")
         dialog.transient(self.root)
         dialog.grab_set()
+        center_toplevel(dialog, self.root, 700, 560)
         body = ttk.Frame(dialog, padding=18)
         body.pack(fill="both", expand=True)
         ttk.Label(body, text="사이트 HTML이 변경된 경우에만 수정하세요.", font=("맑은 고딕", 11, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
@@ -673,15 +1338,15 @@ class App:
         def save():
             updated = {key: value.get().strip() for key, value in values.items()}
             if not all(updated.values()):
-                messagebox.showerror(APP_TITLE, "모든 매칭 값을 입력해 주세요.", parent=dialog)
+                centered_messagebox(dialog, "showerror", APP_TITLE, "모든 매칭 값을 입력해 주세요.")
                 return
             if "{index}" not in updated["extra_file_pattern"]:
-                messagebox.showerror(APP_TITLE, "추가 이미지 패턴에 {index}가 필요합니다.", parent=dialog)
+                centered_messagebox(dialog, "showerror", APP_TITLE, "추가 이미지 패턴에 {index}가 필요합니다.")
                 return
             try:
                 updated["extra_file_pattern"].format(index=1)
             except (KeyError, ValueError) as exc:
-                messagebox.showerror(APP_TITLE, f"추가 이미지 패턴이 올바르지 않습니다: {exc}", parent=dialog)
+                centered_messagebox(dialog, "showerror", APP_TITLE, f"추가 이미지 패턴이 올바르지 않습니다: {exc}")
                 return
             self.write_mapping(updated)
             self.mapping = updated
@@ -710,7 +1375,11 @@ class App:
             data = json.loads(self.settings_path.read_text(encoding="utf-8"))
             self.url.set(data.get("url", DEFAULT_URL))
             self.folder.set(data.get("folder", ""))
-            self.sort_mode.set(data.get("sort_mode", "파일 이름순"))
+            saved_sort = data.get("sort_mode", "파일 이름")
+            if saved_sort in {"파일 이름순", "숫자 파일명 (1~50)"}:
+                saved_sort = "파일 이름"
+            saved_sort = {"변경 날짜": "수정된 날짜", "변경 날짜 (역순)": "수정된 날짜 (역순)"}.get(saved_sort, saved_sort)
+            self.sort_mode.set(saved_sort if saved_sort in SORT_OPTIONS else "파일 이름")
             self.tags.set(data.get("tags", ""))
             self.post_title.set(data.get("post_title", ""))
             self.price.set(data.get("price", ""))
@@ -721,7 +1390,7 @@ class App:
 
     def save_settings(self, content=None, tags=None, post_title=None, price=None):
         if content is None:
-            content = self.content_text.get("1.0", "end-1c")
+            content = self.content_editor.get_html()
         if tags is None:
             tags = self.tags.get().strip()
         if post_title is None:
@@ -740,6 +1409,245 @@ class App:
         }
         self.settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    def reset_default_url(self):
+        self.url.set(DEFAULT_URL)
+        try:
+            self.save_settings()
+        except OSError as exc:
+            centered_messagebox(self.root, "showerror", APP_TITLE, f"기본 페이지 주소를 저장하지 못했습니다.\n{exc}")
+            return
+        self.set_status("기본 개드립콘 등록 페이지 주소로 복원했습니다.")
+        self.write_log(f"등록 페이지 주소 복원: {DEFAULT_URL}")
+
+    def insert_content_syntax(self, kind, anchor=None):
+        if kind == "rule":
+            self.content_editor.insert_html("<hr>")
+            self.content_editor.focus_editor()
+        else:
+            self.open_content_insert_dialog(kind, anchor)
+
+    def toggle_html_view(self):
+        self.content_editor.set_html_mode(self.html_view.get())
+
+    def open_content_insert_dialog(self, kind, anchor=None):
+        configs = {
+            "link": ("링크 삽입", (("표시 텍스트", "text", ""), ("링크", "url", "https://"))),
+            "image": ("이미지 삽입", (("설명 텍스트 (선택)", "text", ""), ("이미지 주소", "url", "https://"))),
+        }
+        if kind not in configs:
+            return
+        title, fields = configs[kind]
+        previous = getattr(self, "content_popover", None)
+        if previous is not None and previous.winfo_exists():
+            previous.destroy()
+        shell = tk.Frame(self.root, bg="#c7d0dd", padx=1, pady=1)
+        self.content_popover = shell
+        body = ttk.Frame(shell, style="Card.TFrame", padding=16)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text=title, style="Section.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 12)
+        )
+        values = {}
+        first_entry = None
+        for row, (label, key, default) in enumerate(fields, start=1):
+            ttk.Label(body, text=label, style="Card.TLabel").grid(row=row, column=0, sticky="w", pady=(0, 10))
+            value = tk.StringVar(value=default)
+            values[key] = value
+            entry = ttk.Entry(body, textvariable=value, width=42 if key == "url" else 24)
+            entry.grid(row=row, column=1, sticky="ew", padx=(12, 0), pady=(0, 10))
+            if key == "url":
+                def clean_url_input(_event=None, target=value, target_entry=entry):
+                    cleaned = normalize_url_prefix(target.get())
+                    if cleaned != target.get():
+                        target.set(cleaned)
+                        target_entry.icursor("end")
+                entry.bind("<KeyRelease>", clean_url_input, add="+")
+                entry.bind("<<Paste>>", lambda _event, callback=clean_url_input: body.after_idle(callback), add="+")
+            if first_entry is None:
+                first_entry = entry
+        body.columnconfigure(1, weight=1)
+        next_row = len(fields) + 1
+        size_entries = []
+        if kind == "image":
+            keep_ratio_var = tk.BooleanVar(value=False)
+            ratio_cache = {"url": None, "image": None}
+            ratio_after_id = [None]
+            ratio_update_guard = [False]
+            last_size_axis = ["width"]
+            ratio_check = tk.Checkbutton(
+                body, text="원본 비율 맞춤", variable=keep_ratio_var,
+                bg="#ffffff", fg="#26384d", activebackground="#ffffff", activeforeground="#26384d",
+                selectcolor="#ffffff", highlightthickness=0, borderwidth=0, relief="flat",
+                font=("맑은 고딕", 9),
+            )
+            ratio_check.grid(row=next_row, column=0, sticky="w", pady=(0, 8))
+            size_frame = ttk.Frame(body, style="Card.TFrame")
+            size_frame.grid(row=next_row, column=1, sticky="ew", padx=(12, 0), pady=(0, 8))
+            for column, (label, key, default) in enumerate((("가로", "width", ""), ("세로", "height", ""))):
+                field = ttk.Frame(size_frame, style="Card.TFrame")
+                field.grid(row=0, column=column, sticky="ew", padx=((0, 9) if column == 0 else (9, 0)))
+                field.columnconfigure(1, weight=1)
+                ttk.Label(field, text=label, style="Card.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
+                value = tk.StringVar(value=default)
+                values[key] = value
+                entry = ttk.Entry(field, textvariable=value, width=16)
+                entry.grid(row=0, column=1, sticky="ew")
+                size_entries.append(entry)
+                size_frame.columnconfigure(column, weight=1, uniform="image_size")
+
+            def fetch_original_image():
+                url = normalize_url_prefix(values["url"].get())
+                if ratio_cache["url"] == url and ratio_cache["image"] is not None:
+                    return ratio_cache["image"]
+                headers = {"User-Agent": "Mozilla/5.0"}
+                if "dcinside.com" in url:
+                    headers["Referer"] = "https://gall.dcinside.com/"
+                response = requests.get(url, timeout=8, headers=headers)
+                response.raise_for_status()
+                with Image.open(io.BytesIO(response.content)) as source:
+                    original = source.convert("RGBA")
+                ratio_cache.update(url=url, image=original)
+                return original
+
+            def apply_ratio():
+                ratio_after_id[0] = None
+                if ratio_update_guard[0] or not keep_ratio_var.get() or not shell.winfo_exists():
+                    return
+                axis = last_size_axis[0]
+                source_var = values[axis]
+                try:
+                    value = int(source_var.get().strip())
+                    if not 1 <= value <= 4096:
+                        return
+                    original_width, original_height = fetch_original_image().size
+                    ratio_update_guard[0] = True
+                    if axis == "width":
+                        values["height"].set(str(matching_image_dimension(value, original_width, original_height)))
+                    else:
+                        values["width"].set(str(matching_image_dimension(value, original_height, original_width)))
+                except Exception:
+                    return
+                finally:
+                    ratio_update_guard[0] = False
+
+            def schedule_ratio(axis):
+                if ratio_update_guard[0]:
+                    return
+                last_size_axis[0] = axis
+                if ratio_after_id[0] is not None:
+                    body.after_cancel(ratio_after_id[0])
+                ratio_after_id[0] = body.after(450, apply_ratio)
+
+            preview_frame = tk.Frame(body, bg="#edf2f8", width=520, height=270, relief="flat")
+            preview_frame.grid(row=next_row + 1, column=0, columnspan=2, sticky="ew", pady=(8, 4))
+            preview_frame.grid_propagate(False)
+            preview_box = tk.Canvas(preview_frame, width=520, height=270, bg="#edf2f8", highlightthickness=0)
+            preview_box.pack(fill="both", expand=True)
+            preview_box.create_text(260, 135, text="이미지 URL을 입력해 주세요.", fill="#53657a")
+            preview_status = ttk.Label(body, text="", style="Hint.TLabel", anchor="center")
+            preview_status.grid(row=next_row + 2, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+            preview_refs = []
+            preview_after_id = [None]
+
+            def load_insert_preview():
+                preview_after_id[0] = None
+                try:
+                    original = fetch_original_image()
+                    width_text = values["width"].get().strip()
+                    height_text = values["height"].get().strip()
+                    width = int(width_text) if width_text else None
+                    height = int(height_text) if height_text else None
+                    if any(value is not None and not 1 <= value <= 4096 for value in (width, height)):
+                        return
+                    if width is None and height is None:
+                        target_width, target_height = original.size
+                    else:
+                        target_width = width if width is not None else matching_image_dimension(height, original.height, original.width)
+                        target_height = height if height is not None else matching_image_dimension(width, original.width, original.height)
+                    preview = original.resize((target_width, target_height), Image.Resampling.LANCZOS)
+                    scale = min(1.0, 500 / target_width, 250 / target_height)
+                    shown_width = max(1, round(target_width * scale))
+                    shown_height = max(1, round(target_height * scale))
+                    if preview.size != (shown_width, shown_height):
+                        preview = preview.resize((shown_width, shown_height), Image.Resampling.LANCZOS)
+                    photo = ImageTk.PhotoImage(preview, master=self.root)
+                    preview_refs[:] = [photo]
+                    preview_box.delete("all")
+                    preview_box.create_rectangle(0, 0, 520, 270, fill="#edf2f8", outline="")
+                    preview_box.create_image(260, 135, image=photo, anchor="center")
+                    preview_box.create_rectangle(
+                        260 - shown_width / 2, 135 - shown_height / 2,
+                        260 + shown_width / 2, 135 + shown_height / 2,
+                        outline="#c4cedb",
+                    )
+                    preview_status.configure(
+                        text=f"원본 {original.width}×{original.height}  ·  적용 {target_width}×{target_height}  ·  미리보기 {round(scale * 100)}%"
+                    )
+                except Exception:
+                    preview_box.delete("all")
+                    preview_box.create_text(260, 135, text="이미지 URL을 확인해 주세요.", fill="#53657a")
+                    preview_status.configure(text="")
+
+            def schedule_insert_preview():
+                if preview_after_id[0] is not None:
+                    body.after_cancel(preview_after_id[0])
+                preview_after_id[0] = body.after(550, load_insert_preview)
+
+            def handle_size_change(axis):
+                schedule_ratio(axis)
+                schedule_insert_preview()
+
+            def handle_url_change():
+                ratio_cache.update(url=None, image=None)
+                schedule_insert_preview()
+
+            values["width"].trace_add("write", lambda *_args: handle_size_change("width"))
+            values["height"].trace_add("write", lambda *_args: handle_size_change("height"))
+            values["url"].trace_add("write", lambda *_args: handle_url_change())
+            ratio_check.configure(command=lambda: (schedule_ratio(last_size_axis[0]), schedule_insert_preview()))
+
+            next_row += 3
+
+        def close_popover():
+            if shell.winfo_exists():
+                shell.destroy()
+            if getattr(self, "content_popover", None) is shell:
+                self.content_popover = None
+
+        def submit():
+            has_size = kind == "image" and (values.get("width").get().strip() or values.get("height").get().strip())
+            syntax_kind = "sized_image" if has_size else kind
+            try:
+                values["url"].set(normalize_url_prefix(values["url"].get()))
+                syntax_values = {key: value.get() for key, value in values.items()}
+                markup = build_content_syntax(syntax_kind, **syntax_values)
+            except ValueError as exc:
+                centered_messagebox(self.root, "showerror", title, str(exc))
+                return
+            self.content_editor.insert_html(markup)
+            self.content_editor.focus_editor()
+            close_popover()
+
+        buttons = ttk.Frame(body, style="Card.TFrame")
+        buttons.grid(row=next_row, column=0, columnspan=2, sticky="e", pady=(4, 0))
+        ttk.Button(buttons, text="취소", command=close_popover, style="Soft.TButton").pack(side="left")
+        ttk.Button(buttons, text="확인", command=submit, style="Navy.TButton").pack(side="left", padx=(8, 0))
+        for entry in body.winfo_children():
+            entry.bind("<Return>", lambda _event: submit())
+            entry.bind("<Escape>", lambda _event: close_popover())
+        shell.update_idletasks()
+        anchor = anchor or self.root
+        x = anchor.winfo_rootx() - self.root.winfo_rootx()
+        x += max(0, (anchor.winfo_width() - shell.winfo_reqwidth()) // 2)
+        y = anchor.winfo_rooty() - self.root.winfo_rooty() + anchor.winfo_height() + 7
+        x = min(max(8, x), max(8, self.root.winfo_width() - shell.winfo_reqwidth() - 8))
+        if y + shell.winfo_reqheight() > self.root.winfo_height() - 8:
+            y = anchor.winfo_rooty() - self.root.winfo_rooty() - shell.winfo_reqheight() - 7
+        shell.place(x=x, y=max(8, y))
+        shell.lift()
+        if first_entry is not None:
+            first_entry.focus_set()
+
     def choose_folder(self):
         selected = filedialog.askdirectory(title="1~50번 이미지가 든 폴더 선택")
         if selected:
@@ -748,7 +1656,7 @@ class App:
 
     def preview(self):
         try:
-            mode = "name" if self.sort_mode.get() == "파일 이름순" else "number"
+            mode = SORT_OPTIONS.get(self.sort_mode.get(), "name")
             files, ignored = collect_files(self.folder.get(), mode)
             self.set_status(f"{len(files)}개 파일 준비 완료 — 첫 파일: {files[0].name}")
             mapping_lines = ["배치 순서"]
@@ -761,7 +1669,7 @@ class App:
             self.save_settings()
         except Exception as exc:
             self.set_status("폴더를 확인해 주세요.")
-            messagebox.showerror(APP_TITLE, str(exc))
+            centered_messagebox(self.root, "showerror", APP_TITLE, str(exc))
 
     def launch_browser(self):
         try:
@@ -779,21 +1687,21 @@ class App:
             self.set_status("전용 브라우저에서 로그인하고 등록 페이지를 열어 주세요.")
             self.write_log(f"브라우저 실행: {browser.name}")
         except Exception as exc:
-            messagebox.showerror(APP_TITLE, str(exc))
+            centered_messagebox(self.root, "showerror", APP_TITLE, str(exc))
 
     def start_fill(self):
-        content = self.content_text.get("1.0", "end-1c")
+        content = self.content_editor.get_html()
         tags = self.tags.get().strip()
         post_title = self.post_title.get().strip()
         price = self.price.get().strip()
         if price and not price.isdigit():
-            messagebox.showerror(APP_TITLE, "판매 포인트는 0 이상의 숫자로 입력해 주세요.")
+            centered_messagebox(self.root, "showerror", APP_TITLE, "판매 포인트는 0 이상의 숫자로 입력해 주세요.")
             return
         threading.Thread(target=self.fill_files, args=(content, tags, post_title, price), daemon=True).start()
 
     def fill_files(self, content, tags, post_title, price):
         try:
-            mode = "name" if self.sort_mode.get() == "파일 이름순" else "number"
+            mode = SORT_OPTIONS.get(self.sort_mode.get(), "name")
             files, ignored = collect_files(self.folder.get(), mode)
             self.set_status("브라우저 연결 중…")
             tabs = requests.get("http://127.0.0.1:9222/json/list", timeout=3).json()
@@ -827,7 +1735,7 @@ class App:
                     });
                 """})
                 if content.strip():
-                    safe_html = render_content(content)
+                    safe_html = content
                     content_selector = json.dumps(self.mapping["content_selector"])
                     editor_selector = json.dumps(self.mapping["editor_selector"])
                     expression = f"""(() => {{
@@ -908,14 +1816,99 @@ class App:
             title_status = " + 제목" if post_title else ""
             price_status = " + 포인트" if price else ""
             self.write_log(f"자동 배치 완료: {len(files)}개, 메인 이미지 {files[0].name}{title_status}{price_status}{content_status}{tag_status}")
-            messagebox.showinfo(APP_TITLE, "파일 배치가 완료되었습니다.\n브라우저에서 제목·가격·이미지를 확인한 후 직접 등록해 주세요.")
+            centered_messagebox(self.root, "showinfo", APP_TITLE, "내용 채우기가 완료되었습니다.\n브라우저에서 내용을 확인한 후 직접 등록해 주세요.")
         except Exception as exc:
             self.set_status("자동 배치 실패")
             self.write_log("오류: " + str(exc))
-            self.root.after(0, lambda: messagebox.showerror(APP_TITLE, str(exc)))
+            self.root.after(0, lambda: centered_messagebox(self.root, "showerror", APP_TITLE, str(exc)))
 
 
-if __name__ == "__main__":
+def run_app():
     root = tk.Tk()
     App(root)
     root.mainloop()
+
+
+def run_editor_self_test(output_path):
+    root = tk.Tk()
+    root.geometry("320x180+-10000+-10000")
+    editor = WysiwygEditor(root, "<p>초기 내용</p>", height=150)
+    editor.pack(fill="both", expand=True)
+    root.update()
+    editor.insert_html('<a href="https://example.com">링크</a><hr><img src="" alt="이미지">')
+    editor.text.insert("insert", "직접 입력")
+    root.focus_force()
+    editor.focus_editor()
+    root.clipboard_clear()
+    root.clipboard_append("키보드 입력")
+    editor.text.event_generate("<<Paste>>")
+    root.update()
+    editor.set_html_mode(True)
+    editor.text.insert("end", "<br>HTML 편집")
+    raw_html_visible = "<a href=" in editor.text.get("1.0", "end-1c")
+    editor.set_html_mode(False)
+    result = editor.get_html()
+    focused = editor.text.focus_get() is editor.text
+    root.clipboard_clear()
+    root.destroy()
+    required = ("초기 내용", "https://example.com", "<hr", "<img", "직접 입력", "키보드 입력", "HTML 편집")
+    payload = {"ok": focused and raw_html_visible and all(item in result for item in required), "focused": focused, "raw_html_visible": raw_html_visible, "html": result}
+    Path(output_path).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return payload["ok"]
+
+
+def run_startup_self_test(output_path):
+    root = tk.Tk()
+    app = App(root)
+    root.update_idletasks()
+    popup_probe = tk.Toplevel(root)
+    center_toplevel(popup_probe, root, 200, 100)
+    popup_probe.update_idletasks()
+    expected_popup_x = max(0, min(root.winfo_x() + (root.winfo_width() - 200) // 2, root.winfo_screenwidth() - 200))
+    expected_popup_y = max(0, min(root.winfo_y() + (root.winfo_height() - 100) // 2, root.winfo_screenheight() - 100))
+    popup_centered = abs(popup_probe.winfo_x() - expected_popup_x) <= 1 and abs(popup_probe.winfo_y() - expected_popup_y) <= 1
+    popup_probe.destroy()
+    version_label_checked = app.version_label.cget("text") == f"v{APP_VERSION}"
+    empty_tag_entry_x = app.tag_input.entry.winfo_rootx()
+    app.content_editor.insert_html('<a href="https://example.com">시작 테스트</a><hr>')
+    app.tag_input.input_var.set("태그 테스트")
+    app.tag_input.commit_event()
+    badge_checked = app.tags.get() == "태그 테스트" and len(app.tag_input.badge_frame.winfo_children()) == 1
+    root.focus_force()
+    root.update()
+    app.tag_input.badge_frame.winfo_children()[0].event_generate("<ButtonRelease-1>")
+    root.update()
+    tag_layout_collapsed = app.tag_input.entry.winfo_rootx() == empty_tag_entry_x and not app.tag_input.badge_frame.winfo_ismapped()
+    cursor_restored = app.tags.get() == "" and root.focus_get() is app.tag_input.entry and app.tag_input.entry.index("insert") == 0 and app.tag_input._pointer_reset_count == 1 and tag_layout_collapsed
+    app.html_view.set(True)
+    app.toggle_html_view()
+    html_checked = app.content_editor.html_mode and "시작 테스트" in app.content_editor.text.get("1.0", "end-1c")
+    app.html_view.set(False)
+    app.toggle_html_view()
+    result = app.content_editor.get_html()
+    payload = {
+        "ok": root.winfo_exists() == 1 and BRAND_TITLE in root.title() and version_label_checked and popup_centered and html_checked and badge_checked and cursor_restored and "시작 테스트" in result and "<hr" in result,
+        "version_label": version_label_checked,
+        "popup_centered": popup_centered,
+        "html_toggle": html_checked,
+        "tag_badge": badge_checked,
+        "tag_cursor_restored": cursor_restored,
+        "mouse_pointer_reset": app.tag_input._pointer_reset_count == 1,
+        "tag_layout_collapsed": tag_layout_collapsed,
+        "title": root.title(),
+        "size": [root.winfo_width(), root.winfo_height()],
+        "html": result,
+    }
+    root.destroy()
+    Path(output_path).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return payload["ok"]
+
+
+if __name__ == "__main__":
+    self_test_arg = next((arg for arg in sys.argv[1:] if arg.startswith("--self-test-output=")), None)
+    startup_test_arg = next((arg for arg in sys.argv[1:] if arg.startswith("--startup-test-output=")), None)
+    if self_test_arg:
+        raise SystemExit(0 if run_editor_self_test(self_test_arg.split("=", 1)[1]) else 1)
+    if startup_test_arg:
+        raise SystemExit(0 if run_startup_self_test(startup_test_arg.split("=", 1)[1]) else 1)
+    run_app()
