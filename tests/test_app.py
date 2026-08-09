@@ -1,12 +1,10 @@
 import os
 import io
-import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from PIL import Image as PILImage
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from app import (
     App,
@@ -331,6 +329,107 @@ class HtmlOnlyEditorTests(unittest.TestCase):
             root.update()
             self.assertIn('href="https://new.example"', editor.get_html())
             self.assertIn(">New text</a>", editor.get_html())
+        finally:
+            root.destroy()
+
+    def test_plain_url_paste_creates_hyperlink(self):
+        import tkinter as tk
+
+        root = tk.Tk(); root.geometry("640x300+-10000+-10000")
+        try:
+            editor = WysiwygEditor(root, "")
+            editor.pack(fill="both", expand=True); root.update()
+            root.clipboard_clear(); root.clipboard_append("https://example.com/page")
+            self.assertEqual(editor._paste_rich_html(), "break")
+            self.assertEqual(
+                editor.get_html(),
+                '<a href="https://example.com/page" target="_blank">https://example.com/page</a>',
+            )
+        finally:
+            root.destroy()
+
+    def test_link_copy_and_paste_preserves_hyperlink(self):
+        import tkinter as tk
+
+        root = tk.Tk(); root.geometry("640x300+-10000+-10000")
+        try:
+            editor = WysiwygEditor(root, '<a href="https://example.com">Example</a>')
+            editor.pack(fill="both", expand=True); root.update()
+            tag = next(iter(editor.links))
+            start, end = editor.text.tag_ranges(tag)
+            editor.text.tag_add("sel", start, end)
+            self.assertEqual(editor._copy_content(), "break")
+            editor.text.tag_remove("sel", "1.0", "end")
+            editor.text.mark_set("insert", "end-1c")
+            self.assertEqual(editor._paste_rich_html(), "break")
+            self.assertEqual(editor.get_html().count('<a href="https://example.com"'), 2)
+        finally:
+            root.destroy()
+
+    def test_image_copy_cut_paste_undo_and_redo(self):
+        import tkinter as tk
+
+        encoded = io.BytesIO()
+        PILImage.new("RGB", (32, 24), "blue").save(encoded, format="PNG")
+
+        class Response:
+            content = encoded.getvalue()
+            def raise_for_status(self):
+                return None
+
+        root = tk.Tk(); root.geometry("640x400+-10000+-10000")
+        try:
+            with patch("app.requests.get", return_value=Response()):
+                editor = WysiwygEditor(root, '<img src="https://example.com/image.png" alt="sample" width="32">')
+                editor.pack(fill="both", expand=True); root.update()
+                label = root.nametowidget(next(iter(editor.image_data)))
+                editor._select_embed(label)
+                self.assertEqual(editor._copy_content(), "break")
+                editor.text.mark_set("insert", "end-1c")
+                self.assertEqual(editor._paste_rich_html(), "break")
+                root.update()
+                self.assertEqual(editor.get_html().count("<img "), 2)
+
+                first_label = root.nametowidget(next(iter(editor.image_data)))
+                editor._select_embed(first_label)
+                self.assertEqual(editor._cut_content(), "break")
+                self.assertEqual(editor.get_html().count("<img "), 1)
+                editor._undo(); root.update()
+                self.assertEqual(editor.get_html().count("<img "), 2)
+                editor._redo(); root.update()
+                self.assertEqual(editor.get_html().count("<img "), 1)
+        finally:
+            root.destroy()
+
+    def test_text_changes_are_in_custom_undo_history(self):
+        import tkinter as tk
+
+        root = tk.Tk(); root.geometry("640x300+-10000+-10000")
+        try:
+            editor = WysiwygEditor(root, "")
+            editor.pack(fill="both", expand=True); root.update()
+            editor.text.insert("insert", "typed text")
+            editor._commit_history(force=True)
+            editor._undo()
+            self.assertEqual(editor.get_html(), "")
+            editor._redo()
+            self.assertEqual(editor.get_html(), "typed text")
+        finally:
+            root.destroy()
+
+    def test_editor_background_has_context_menu_and_plain_paste(self):
+        import tkinter as tk
+
+        root = tk.Tk(); root.geometry("640x300+-10000+-10000")
+        try:
+            editor = WysiwygEditor(root, "")
+            editor.pack(fill="both", expand=True); root.update()
+            self.assertTrue(editor.text.bind("<Button-3>"))
+            root.clipboard_clear(); root.clipboard_append("일반 텍스트")
+            editor._paste_from_menu()
+            self.assertEqual(editor.get_html(), "일반 텍스트")
+            editor._undo()
+            self.assertEqual(editor.get_html(), "")
         finally:
             root.destroy()
 
