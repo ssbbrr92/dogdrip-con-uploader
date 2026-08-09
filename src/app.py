@@ -21,9 +21,9 @@ import websocket
 from PIL import Image, ImageTk
 
 
-APP_TITLE = "개드립콘 폴더 업로더"
+APP_TITLE = "개드립콘 업로더"
 BRAND_TITLE = "DogDrip.Con Uploader"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.1.0"
 DEFAULT_URL = "https://www.dogdrip.net/index.php?mid=dogcon&act=dispDogconWrite"
 SETTINGS_FILENAME = "dogdrip-con-uploader-settings.json"
 MAPPING_FILENAME = "dogdrip-con-uploader.ini"
@@ -218,6 +218,15 @@ class _ClipboardHtmlSanitizer(HTMLParser):
             href = normalize_url_prefix(dict(attrs).get("href", ""))
             if re.fullmatch(r"https?://\S+", href, re.IGNORECASE):
                 self.output.append(f'<a href="{html.escape(href, quote=True)}" target="_blank">'); self.anchor_open = True
+        elif tag.lower() == "img":
+            values = dict(attrs)
+            src = normalize_url_prefix(values.get("src", ""))
+            if re.fullmatch(r"https?://\S+", src, re.IGNORECASE):
+                alt = values.get("alt", "")
+                width = values.get("width", "") if str(values.get("width", "")).isdigit() else ""
+                height = values.get("height", "") if str(values.get("height", "")).isdigit() else ""
+                kind = "sized_image" if width or height else "image"
+                self.output.append(build_content_syntax(kind, text=alt, url=src, width=width, height=height))
         elif tag.lower() == "br": self.output.append("<br>")
     def handle_endtag(self, tag):
         if tag.lower() == "a" and self.anchor_open: self.output.append("</a>"); self.anchor_open = False
@@ -273,6 +282,13 @@ class WysiwygEditor(tk.Frame):
         self.image_data = {}
         self.counter = 0
         self.html_mode = False
+        self.selected_embed = None
+        self.internal_clipboard_html = ""
+        self.internal_clipboard_text = ""
+        self.history = []
+        self.history_index = -1
+        self.history_after_id = None
+        self.history_restoring = True
         self.text = tk.Text(
             self, wrap="word", relief="flat", borderwidth=0, highlightthickness=0,
             font=("맑은 고딕", 10), fg="#26384f", bg="#fbfcfe",
@@ -280,14 +296,204 @@ class WysiwygEditor(tk.Frame):
         )
         self.text.pack(fill="both", expand=True, padx=1, pady=1)
         self.text.bind("<<Paste>>", self._paste_rich_html, add="+")
+        self.text.bind("<<Copy>>", self._copy_content, add="+")
+        self.text.bind("<<Cut>>", self._cut_content, add="+")
+        self.text.bind("<<Undo>>", self._undo, add="+")
+        self.text.bind("<<Redo>>", self._redo, add="+")
+        self.text.bind("<Control-z>", self._undo, add="+")
+        self.text.bind("<Control-y>", self._redo, add="+")
+        self.text.bind("<Button-1>", lambda _event: self._clear_embed_selection(), add="+")
+        self.text.bind("<Button-3>", self._show_editor_menu, add="+")
         self.insert_html(self.initial_html)
+        self.history_restoring = False
+        self.text.edit_modified(False)
+        self.text.bind("<<Modified>>", self._schedule_history, add="+")
+        self._commit_history(force=True)
 
     def _paste_rich_html(self, _event=None):
+        clipboard_text = self._clipboard_text()
+        if self.internal_clipboard_html and clipboard_text == self.internal_clipboard_text:
+            self.insert_html(self.internal_clipboard_html)
+            self._commit_history(force=True)
+            return "break"
         source = get_windows_clipboard_html()
-        if not source: return None
-        markup = sanitize_clipboard_html(source)
-        if "<a " not in markup: return None
-        self.insert_html(markup); return "break"
+        if source:
+            markup = sanitize_clipboard_html(source)
+            if "<a " in markup or "<img " in markup:
+                self.insert_html(markup)
+                self._commit_history(force=True)
+                return "break"
+        if re.fullmatch(r"https?://\S+", clipboard_text, re.IGNORECASE):
+            self.insert_html(build_content_syntax("link", text=clipboard_text, url=clipboard_text))
+            self._commit_history(force=True)
+            return "break"
+        return None
+
+    def _clipboard_text(self):
+        try:
+            return self.clipboard_get()
+        except tk.TclError:
+            return ""
+
+    def _set_internal_clipboard(self, markup, plain_text):
+        self.internal_clipboard_html = markup
+        self.internal_clipboard_text = plain_text
+        self.clipboard_clear()
+        self.clipboard_append(plain_text)
+        self.update_idletasks()
+
+    def _selection_range(self):
+        try:
+            return str(self.text.index("sel.first")), str(self.text.index("sel.last"))
+        except tk.TclError:
+            return None
+
+    def _copy_content(self, _event=None):
+        if self.selected_embed is not None and self.selected_embed.winfo_exists():
+            key = str(self.selected_embed)
+            markup = self.embeds.get(key, "")
+            if markup:
+                self._set_internal_clipboard(markup, markup)
+                return "break"
+        selection = self._selection_range()
+        if selection:
+            start, end = selection
+            markup = self.get_html(start, end)
+            plain = self.text.get(start, end)
+            if "<a " in markup or "<img " in markup or "<hr" in markup:
+                self._set_internal_clipboard(markup, plain or markup)
+                return "break"
+            self.internal_clipboard_html = ""
+            self.internal_clipboard_text = ""
+            self.clipboard_clear()
+            self.clipboard_append(plain)
+            self.update_idletasks()
+            return "break"
+        return None
+
+    def _cut_content(self, _event=None):
+        if self.selected_embed is not None and self.selected_embed.winfo_exists():
+            widget = self.selected_embed
+            key = str(widget)
+            markup = self.embeds.get(key, "")
+            if not markup:
+                return "break"
+            self._set_internal_clipboard(markup, markup)
+            try:
+                index = self.text.index(widget)
+                self.text.delete(index)
+            except tk.TclError:
+                pass
+            self.embeds.pop(key, None)
+            self.image_data.pop(key, None)
+            self.selected_embed = None
+            if widget.winfo_exists():
+                widget.destroy()
+            self._commit_history(force=True)
+            return "break"
+        selection = self._selection_range()
+        if selection:
+            copied = self._copy_content()
+            if copied == "break":
+                self.text.delete(*selection)
+                self._commit_history(force=True)
+                return "break"
+        return None
+
+    def _paste_from_menu(self):
+        if self._paste_rich_html() == "break":
+            return
+        value = self._clipboard_text()
+        if value:
+            self.text.insert("insert", value)
+            self._commit_history(force=True)
+
+    def _show_editor_menu(self, event):
+        if not self._selection_range():
+            self.text.mark_set("insert", self.text.index(f"@{event.x},{event.y}"))
+        self._clear_embed_selection()
+        menu = tk.Menu(
+            self, tearoff=False, bg="#ffffff", fg="#26384d",
+            activebackground="#2e486b", activeforeground="#ffffff",
+            disabledforeground="#aeb9c7", relief="flat", borderwidth=1,
+            font=("맑은 고딕", 9),
+        )
+        menu.add_command(label="실행 취소", command=self._undo, state="normal" if self.history_index > 0 else "disabled")
+        menu.add_command(label="다시 실행", command=self._redo, state="normal" if self.history_index + 1 < len(self.history) else "disabled")
+        menu.add_separator()
+        selection_state = "normal" if self._selection_range() else "disabled"
+        menu.add_command(label="잘라내기", command=self._cut_content, state=selection_state)
+        menu.add_command(label="복사", command=self._copy_content, state=selection_state)
+        menu.add_command(label="붙여넣기", command=self._paste_from_menu, state="normal" if self._clipboard_text() or get_windows_clipboard_html() else "disabled")
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    def _schedule_history(self, _event=None):
+        self.text.edit_modified(False)
+        if self.history_restoring:
+            return
+        if self.history_after_id is not None:
+            self.after_cancel(self.history_after_id)
+        self.history_after_id = self.after(450, self._commit_history)
+
+    def _snapshot(self):
+        return self.get_html(), str(self.text.index("insert")), self.html_mode
+
+    def _commit_history(self, force=False):
+        self.history_after_id = None
+        if self.history_restoring:
+            return
+        snapshot = self._snapshot()
+        if not force and self.history and self.history[self.history_index] == snapshot:
+            return
+        if self.history and self.history[self.history_index][0] == snapshot[0] and self.history[self.history_index][2] == snapshot[2]:
+            self.history[self.history_index] = snapshot
+            return
+        del self.history[self.history_index + 1:]
+        self.history.append(snapshot)
+        self.history_index = len(self.history) - 1
+        if len(self.history) > 100:
+            self.history.pop(0)
+            self.history_index -= 1
+
+    def _restore_snapshot(self, snapshot):
+        source, cursor, html_mode = snapshot
+        self.history_restoring = True
+        self._clear_embed_selection()
+        self.text.delete("1.0", "end")
+        self.links.clear(); self.embeds.clear(); self.images.clear(); self.image_data.clear()
+        self.html_mode = bool(html_mode)
+        if self.html_mode:
+            self.text.insert("1.0", source)
+        else:
+            self.insert_html(source)
+        try:
+            self.text.mark_set("insert", cursor)
+        except tk.TclError:
+            self.text.mark_set("insert", "end-1c")
+        self.text.edit_reset()
+        self.text.edit_modified(False)
+        self.history_restoring = False
+        self.focus_editor()
+
+    def _undo(self, _event=None):
+        if self.history_after_id is not None:
+            self.after_cancel(self.history_after_id)
+            self.history_after_id = None
+            self._commit_history()
+        if self.history_index > 0:
+            self.history_index -= 1
+            self._restore_snapshot(self.history[self.history_index])
+        return "break"
+
+    def _redo(self, _event=None):
+        if self.history_index + 1 < len(self.history):
+            self.history_index += 1
+            self._restore_snapshot(self.history[self.history_index])
+        return "break"
 
     def _attributes(self, source):
         return {key.lower(): html.unescape(value) for key, _, value in re.findall(r"([\w-]+)\s*=\s*(['\"])(.*?)\2", source)}
@@ -348,6 +554,7 @@ class WysiwygEditor(tk.Frame):
             self.links[tag] = cleaned_url
             self.text.delete(start_index, end_index)
             self.text.insert(start_index, new_text, (tag,))
+            self._commit_history(force=True)
             dialog.destroy()
 
         buttons = ttk.Frame(body, style="Card.TFrame")
@@ -395,11 +602,39 @@ class WysiwygEditor(tk.Frame):
         size = (f' width="{width}"' if width else "") + (f' height="{height}"' if height else "")
         self.embeds[str(label)] = f'<img src="{escaped_src}" alt="{escaped_alt}"{size}>'
         self.image_data[str(label)] = {"src": src, "alt": alt, "width": width, "height": height}
+        label.bind("<Button-1>", lambda event, widget=label: self._select_embed(widget, event))
         label.bind("<Button-3>", lambda event, widget=label: self._show_image_menu(widget, event))
+        label.bind("<Control-c>", self._copy_content)
+        label.bind("<Control-x>", self._cut_content)
+        label.bind("<Control-v>", self._paste_rich_html)
+        label.bind("<Control-z>", self._undo)
+        label.bind("<Control-y>", self._redo)
+
+    def _clear_embed_selection(self):
+        widget = self.selected_embed
+        if widget is not None and widget.winfo_exists():
+            widget.configure(highlightthickness=0)
+        self.selected_embed = None
+
+    def _select_embed(self, label, _event=None):
+        self._clear_embed_selection()
+        self.selected_embed = label
+        label.configure(highlightbackground="#3478f6", highlightcolor="#3478f6", highlightthickness=2)
+        try:
+            self.text.mark_set("insert", f"{self.text.index(label)}+1c")
+        except tk.TclError:
+            pass
+        self.text.focus_set()
+        return "break"
 
     def _show_image_menu(self, label, event):
+        self._select_embed(label)
         menu = tk.Menu(self, tearoff=False, bg="#ffffff", fg="#26384d", activebackground="#2e486b", activeforeground="#ffffff", relief="flat", borderwidth=1, font=("맑은 고딕", 9))
         menu.add_command(label="이미지 수정", command=lambda: self._open_image_resize(label))
+        menu.add_separator()
+        menu.add_command(label="복사", command=self._copy_content)
+        menu.add_command(label="잘라내기", command=self._cut_content)
+        menu.add_command(label="붙여넣기", command=self._paste_from_menu, state="normal" if self._clipboard_text() or get_windows_clipboard_html() else "disabled")
         try: menu.tk_popup(event.x_root, event.y_root)
         finally: menu.grab_release()
 
@@ -522,6 +757,7 @@ class WysiwygEditor(tk.Frame):
             size = (f' width="{width}"' if width else "") + (f' height="{height}"' if height else "")
             self.embeds[str(label)] = f'<img src="{escaped_src}" alt="{escaped_alt}"{size}>'
             self.images.append(photo); label.configure(image=photo, text="")
+            self._commit_history(force=True)
             dialog.destroy()
         url_var.trace_add("write", schedule_preview)
         width_var.trace_add("write", lambda *_args: (sync_ratio("width"), schedule_preview()))
@@ -531,13 +767,19 @@ class WysiwygEditor(tk.Frame):
         ttk.Button(buttons, text="취소", command=dialog.destroy, style="Soft.TButton").pack(side="left", padx=8); ttk.Button(buttons, text="확인", command=apply_size, style="Navy.TButton").pack(side="left")
         dialog.update_idletasks(); center_toplevel(dialog, self.winfo_toplevel(), 600, 560); dialog.deiconify(); dialog.grab_set(); dialog.after(50, lambda: load_preview(False))
 
-    def get_html(self):
+    def get_html(self, start="1.0", end="end-1c"):
         if self.html_mode:
-            return self.text.get("1.0", "end-1c")
+            return self.text.get(start, end)
         output = []
-        active_link = None
-        for event, value, _index in self.text.dump("1.0", "end-1c", text=True, tag=True, window=True):
+        active_link = next((tag for tag in self.text.tag_names(start) if tag in self.links), None)
+        if active_link:
+            output.append(f'<a href="{html.escape(self.links[active_link], quote=True)}" target="_blank">')
+        for event, value, _index in self.text.dump(start, end, text=True, tag=True, window=True):
             if event == "tagon" and value in self.links:
+                if active_link == value:
+                    continue
+                if active_link:
+                    output.append("</a>")
                 active_link = value
                 output.append(f'<a href="{html.escape(self.links[value], quote=True)}" target="_blank">')
             elif event == "tagoff" and value == active_link:
@@ -595,6 +837,7 @@ class WysiwygEditor(tk.Frame):
             self.image_data.clear()
             self.html_mode = False
             self.insert_html(source)
+        self._commit_history(force=True)
         self.focus_editor()
 
 
@@ -1228,12 +1471,12 @@ class App:
         dialog = tk.Toplevel(self.root)
         self.guide_window = dialog
         dialog.title("DogDrip.Con Uploader 사용 가이드")
-        dialog.geometry("680x590")
-        dialog.minsize(600, 520)
+        dialog.geometry("680x640")
+        dialog.minsize(600, 570)
         dialog.transient(self.root)
         dialog.lift()
         dialog.configure(bg="#e8ebef")
-        center_toplevel(dialog, self.root, 680, 590)
+        center_toplevel(dialog, self.root, 680, 640)
 
         header = tk.Frame(dialog, bg=navy, padx=24, pady=14)
         header.pack(fill="x")
@@ -1261,10 +1504,14 @@ class App:
             (
                 "2",
                 "게시글 정보 입력",
-                "• 게시글 제목, 판매 포인트, 본문과 태그를 입력합니다.\n"
-                "• 본문은 링크, 가로줄, 원격 이미지 문법을 지원합니다.\n"
-                "• 제목이나 포인트 등을 비워두면 해당 페이지 값은 변경하지 않습니다.\n"
-                "• 본문 상단의 링크·가로줄·이미지 버튼을 사용할 수 있습니다.",
+                "• WYSIWYG 에디터에서 실제 결과와 유사한 형태로 본문을 작성합니다.\n"
+                "• 링크·가로줄·이미지 버튼과 HTML 보기를 사용할 수 있습니다.\n"
+                "• 링크와 이미지를 우클릭하면 내용·URL·크기를 수정할 수 있습니다.\n"
+                "• 태그는 쉼표로 구분하며 입력한 태그는 배지로 표시됩니다.\n"
+                "• 비워 둔 선택 항목은 등록 페이지의 기존 값을 변경하지 않습니다.\n"
+                "단축키 가이드\n"
+                "• Ctrl+C 복사 · Ctrl+X 잘라내기 · Ctrl+V 붙여넣기\n"
+                "• Ctrl+Z 실행 취소 · Ctrl+Y 다시 실행",
             ),
             (
                 "3",
@@ -1284,6 +1531,17 @@ class App:
             copy.pack(side="left", fill="x", expand=True)
             tk.Label(copy, text=title, bg=white, fg=navy, font=("맑은 고딕", 12, "bold")).pack(anchor="w")
             for description_line in description.splitlines():
+                if description_line == "단축키 가이드":
+                    tk.Label(
+                        copy,
+                        text=description_line,
+                        bg=white,
+                        fg=navy,
+                        justify="left",
+                        font=("맑은 고딕", 10, "bold"),
+                        anchor="w",
+                    ).pack(anchor="w", pady=(8, 1))
+                    continue
                 tk.Label(
                     copy,
                     text=description_line,
@@ -1886,8 +2144,23 @@ def run_startup_self_test(output_path):
     app.html_view.set(False)
     app.toggle_html_view()
     result = app.content_editor.get_html()
+    app.show_guide()
+    root.update_idletasks()
+    guide_labels = []
+    pending_widgets = [app.guide_window]
+    while pending_widgets:
+        current_widget = pending_widgets.pop()
+        pending_widgets.extend(current_widget.winfo_children())
+        if isinstance(current_widget, tk.Label):
+            guide_labels.append(str(current_widget.cget("text")))
+    guide_text = "\n".join(guide_labels)
+    guide_updated = all(
+        phrase in guide_text
+        for phrase in ("WYSIWYG 에디터", "단축키 가이드", "Ctrl+C", "Ctrl+Z", "Ctrl+Y")
+    )
+    app.guide_window.destroy()
     payload = {
-        "ok": root.winfo_exists() == 1 and BRAND_TITLE in root.title() and version_label_checked and popup_centered and html_checked and badge_checked and cursor_restored and "시작 테스트" in result and "<hr" in result,
+        "ok": root.winfo_exists() == 1 and BRAND_TITLE in root.title() and version_label_checked and popup_centered and html_checked and badge_checked and cursor_restored and guide_updated and "시작 테스트" in result and "<hr" in result,
         "version_label": version_label_checked,
         "popup_centered": popup_centered,
         "html_toggle": html_checked,
@@ -1895,6 +2168,7 @@ def run_startup_self_test(output_path):
         "tag_cursor_restored": cursor_restored,
         "mouse_pointer_reset": app.tag_input._pointer_reset_count == 1,
         "tag_layout_collapsed": tag_layout_collapsed,
+        "guide_updated": guide_updated,
         "title": root.title(),
         "size": [root.winfo_width(), root.winfo_height()],
         "html": result,
