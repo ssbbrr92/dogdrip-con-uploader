@@ -17,7 +17,7 @@
 
 ## 다운로드 및 사용
 
-일반 사용자는 GitHub Releases에서 최신 EXE를 내려받아 실행하면 됩니다. 상세 절차는 [사용법](docs/사용법.txt)을 참고하세요. v1.1.0의 변경 내용은 [릴리즈 노트](docs/RELEASE_NOTES_v1.1.0.md)에서 확인할 수 있습니다.
+일반 사용자는 GitHub Releases에서 최신 EXE를 내려받아 실행하면 됩니다. 상세 절차는 [사용법](docs/사용법.txt)을 참고하세요. v1.1.1의 변경 내용은 [릴리즈 노트](docs/RELEASE_NOTES_v1.1.1.md)에서 확인할 수 있습니다.
 
 1. 이미지 폴더를 선택합니다.
 2. 게시글 정보와 배치 순서를 입력합니다.
@@ -49,7 +49,7 @@ python -m unittest discover -s tests -v
 .\build.ps1
 ```
 
-빌드 결과는 `dist\DogDrip.Con-Uploader-v1.1.0.exe`에 생성됩니다.
+빌드 결과는 `dist\DogDrip.Con-Uploader-v1.1.1.exe`에 생성됩니다.
 
 ## 배포 관련 주의
 

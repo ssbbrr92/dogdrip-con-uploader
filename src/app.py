@@ -11,6 +11,25 @@ import sys
 import threading
 import time
 
+# Tcl 8.6.13 on Windows can reject PyInstaller's underscore-prefixed library
+# directories as well as backslash-form paths. Normalize both before tkinter
+# creates its first interpreter. A one-file build only renames its temporary,
+# automatically removed extraction directories.
+if getattr(sys, "frozen", False) and sys.platform == "win32":
+    _bundle_root = getattr(sys, "_MEIPASS", "")
+    for _tk_library_var, _bundled_name, _normalized_name in (
+        ("TCL_LIBRARY", "_tcl_data", "tcl8.6"),
+        ("TK_LIBRARY", "_tk_data", "tk8.6"),
+    ):
+        _bundled_path = os.path.join(_bundle_root, _bundled_name)
+        _normalized_path = os.path.join(_bundle_root, _normalized_name)
+        try:
+            if os.path.isdir(_bundled_path) and not os.path.exists(_normalized_path):
+                os.replace(_bundled_path, _normalized_path)
+        except OSError:
+            _normalized_path = _bundled_path
+        os.environ[_tk_library_var] = _normalized_path.replace("\\", "/")
+
 import tkinter as tk
 from pathlib import Path
 from html.parser import HTMLParser
@@ -23,7 +42,7 @@ from PIL import Image, ImageTk
 
 APP_TITLE = "개드립콘 업로더"
 BRAND_TITLE = "DogDrip.Con Uploader"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 DEFAULT_URL = "https://www.dogdrip.net/index.php?mid=dogcon&act=dispDogconWrite"
 SETTINGS_FILENAME = "dogdrip-con-uploader-settings.json"
 MAPPING_FILENAME = "dogdrip-con-uploader.ini"
@@ -32,6 +51,7 @@ LEGACY_MAPPING_FILENAME = "dogcon-uploader.ini"
 PROFILE_DIRECTORY = "dogdrip-con-browser-profile"
 LEGACY_PROFILE_DIRECTORY = "dogcon-browser-profile"
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+FONT_SIZE_OPTIONS = tuple(range(8, 17)) + (18, 20, 24, 28, 32, 36, 40, 48)
 SORT_OPTIONS = {
     "파일 이름": "name",
     "파일 이름 (역순)": "name_desc",
@@ -138,6 +158,62 @@ def centered_messagebox(parent, kind, title, message):
         if previous_grab is not None and previous_grab.winfo_exists():
             previous_grab.grab_set()
     return "ok"
+
+
+def add_tooltip(widget, text):
+    state = {"window": None, "after": None, "suppress_until": 0.0}
+
+    def show():
+        state["after"] = None
+        if (
+            state["window"] is not None
+            or not widget.winfo_exists()
+            or time.monotonic() < state["suppress_until"]
+            or not widget.winfo_viewable()
+            or widget.winfo_toplevel().state() != "normal"
+        ):
+            return
+        tip = tk.Toplevel(widget)
+        tip.overrideredirect(True)
+        tip.attributes("-topmost", True)
+        tk.Label(
+            tip, text=text, bg="#26384d", fg="#ffffff", padx=8, pady=4,
+            font=("맑은 고딕", 9), relief="flat",
+        ).pack()
+        tip.update_idletasks()
+        tip.geometry(f"+{widget.winfo_rootx()}+{widget.winfo_rooty() + widget.winfo_height() + 5}")
+        state["window"] = tip
+
+    def enter(_event=None):
+        if time.monotonic() < state["suppress_until"]:
+            return
+        state["after"] = widget.after(450, show)
+
+    def leave(_event=None):
+        if state["after"] is not None:
+            try:
+                widget.after_cancel(state["after"])
+            except tk.TclError:
+                pass
+            state["after"] = None
+        if state["window"] is not None:
+            try:
+                state["window"].destroy()
+            except tk.TclError:
+                pass
+            state["window"] = None
+
+    def press(event=None):
+        # 클릭으로 팝다운/팝오버를 연 직후 synthetic Enter가 다시 발생해도
+        # 툴팁을 띄우지 않는다.
+        state["suppress_until"] = time.monotonic() + 2.0
+        leave(event)
+
+    widget.bind("<Enter>", enter, add="+")
+    widget.bind("<Leave>", leave, add="+")
+    widget.bind("<ButtonPress>", press, add="+")
+    widget.winfo_toplevel().bind("<Unmap>", leave, add="+")
+    widget.winfo_toplevel().bind("<Destroy>", leave, add="+")
 
 
 def app_dir():
@@ -266,9 +342,85 @@ def render_content(text):
 
 def editor_initial_html(content):
     content = (content or "").strip()
-    if re.search(r"<(?:p|div|br|hr|a|img)\b", content, re.IGNORECASE):
+    if re.search(r"<(?:p|div|br|hr|a|img|strong|b|em|i|u|span)\b", content, re.IGNORECASE):
         return content
     return render_content(content)
+
+
+class _EditorHtmlLoader(HTMLParser):
+    """Load the small, supported HTML subset into the Tk text editor."""
+
+    def __init__(self, editor):
+        super().__init__(convert_charrefs=True)
+        self.editor = editor
+        self.formats = set()
+        self.alignment = ""
+        self.link_tag = ""
+        self.stack = []
+
+    @staticmethod
+    def _style_values(attrs):
+        style = dict(attrs).get("style", "")
+        return {
+            key.strip().lower(): value.strip().lower()
+            for key, value in (item.split(":", 1) for item in style.split(";") if ":" in item)
+        }
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag == "br":
+            self.editor.text.insert("insert", "\n", self._active_tags())
+            return
+        if tag == "hr":
+            self.editor._insert_rule()
+            return
+        if tag == "img":
+            self.editor._insert_image(self.get_starttag_text())
+            return
+        self.stack.append((tag, set(self.formats), self.alignment, self.link_tag))
+        values = dict(attrs)
+        styles = self._style_values(attrs)
+        if tag in {"strong", "b"}:
+            self.formats.add("sem_bold")
+        elif tag in {"em", "i"}:
+            self.formats.add("sem_italic")
+        elif tag == "u":
+            self.formats.add("sem_underline")
+        elif tag == "a":
+            href = normalize_url_prefix(values.get("href", ""))
+            if re.fullmatch(r"https?://\S+", href, re.IGNORECASE):
+                self.link_tag = self.editor._create_link_tag(href)
+        if tag == "span":
+            size_match = re.match(r"(\d{1,2})(?:px)?$", styles.get("font-size", ""))
+            if size_match and 8 <= int(size_match.group(1)) <= 48:
+                self.editor._ensure_size_tag(int(size_match.group(1)))
+                self.formats = {name for name in self.formats if not name.startswith("sem_size_")}
+                self.formats.add(f"sem_size_{size_match.group(1)}")
+        if tag in {"p", "div", "span"}:
+            alignment = styles.get("text-align", "")
+            if alignment in {"left", "center", "right"}:
+                self.alignment = f"align_{alignment}"
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag:
+                _tag, self.formats, self.alignment, self.link_tag = self.stack[index]
+                del self.stack[index:]
+                break
+        if tag in {"p", "div"} and self.editor.text.index("insert") != "1.0":
+            if self.editor.text.get("insert-1c", "insert") != "\n":
+                self.editor.text.insert("insert", "\n")
+
+    def handle_data(self, data):
+        if data:
+            self.editor.text.insert("insert", data, self._active_tags())
+
+    def _active_tags(self):
+        return tuple(sorted(self.formats) + ([self.alignment] if self.alignment else []) + ([self.link_tag] if self.link_tag else []))
 
 
 class WysiwygEditor(tk.Frame):
@@ -289,26 +441,280 @@ class WysiwygEditor(tk.Frame):
         self.history_index = -1
         self.history_after_id = None
         self.history_restoring = True
+        self.pending_formats = set()
+        self.pending_alignment = ""
+        self.base_font_family = "맑은 고딕"
         self.text = tk.Text(
             self, wrap="word", relief="flat", borderwidth=0, highlightthickness=0,
             font=("맑은 고딕", 10), fg="#26384f", bg="#fbfcfe",
-            insertbackground="#26384f", padx=9, pady=8, undo=True,
+            insertbackground="#26384f", insertwidth=2, insertontime=600, insertofftime=300,
+            padx=9, pady=8, undo=True, exportselection=False,
         )
         self.text.pack(fill="both", expand=True, padx=1, pady=1)
+        self._configure_format_tags()
         self.text.bind("<<Paste>>", self._paste_rich_html, add="+")
         self.text.bind("<<Copy>>", self._copy_content, add="+")
         self.text.bind("<<Cut>>", self._cut_content, add="+")
         self.text.bind("<<Undo>>", self._undo, add="+")
         self.text.bind("<<Redo>>", self._redo, add="+")
-        self.text.bind("<Control-z>", self._undo, add="+")
-        self.text.bind("<Control-y>", self._redo, add="+")
-        self.text.bind("<Button-1>", lambda _event: self._clear_embed_selection(), add="+")
+        self.text.bind("<Control-KeyPress>", self._handle_control_shortcut, add="+")
+        self.text.bind("<KeyPress>", self._remember_typing_index, add="+")
+        self.text.bind("<ButtonPress-1>", self._focus_text_from_mouse, add="+")
+        self.text.bind("<ButtonRelease-1>", self._restore_text_focus, add="+")
         self.text.bind("<Button-3>", self._show_editor_menu, add="+")
         self.insert_html(self.initial_html)
         self.history_restoring = False
         self.text.edit_modified(False)
         self.text.bind("<<Modified>>", self._schedule_history, add="+")
         self._commit_history(force=True)
+
+    def _focus_text_from_mouse(self, _event=None):
+        self._clear_embed_selection()
+        # 일부 Windows/Tk 조합에서는 TextButton1이 insert 위치만 변경하고
+        # 키보드 포커스를 루트 창에 남겨 캐럿이 표시되지 않는다.
+        self.text.focus_force()
+        self.after_idle(self.text.focus_force)
+        self.after(20, self.text.focus_force)
+        return None
+
+    def _restore_text_focus(self, _event=None):
+        self.text.focus_force()
+        self.after_idle(self.text.focus_force)
+        self.after(20, self.text.focus_force)
+        return None
+
+    def _handle_control_shortcut(self, event):
+        """한글 IME 상태에서도 물리 키코드로 편집기 단축키를 처리한다."""
+        key = str(getattr(event, "keysym", "")).lower()
+        keycode = int(getattr(event, "keycode", 0) or 0)
+        if key not in {"a", "b", "i", "u", "c", "x", "v", "z", "y"}:
+            key = {
+                65: "a", 66: "b", 73: "i", 85: "u", 67: "c", 88: "x",
+                86: "v", 90: "z", 89: "y",
+            }.get(keycode, "")
+
+        def select_all():
+            self.text.tag_add("sel", "1.0", "end-1c")
+            self.text.mark_set("insert", "end-1c")
+            self.text.see("insert")
+
+        actions = {
+            "a": select_all,
+            "b": lambda: self.toggle_format("bold"),
+            "i": lambda: self.toggle_format("italic"),
+            "u": lambda: self.toggle_format("underline"),
+            "c": lambda: self._copy_content(event),
+            "x": lambda: self._cut_content(event),
+            "v": lambda: self._paste_rich_html(event),
+            "z": lambda: self._undo(event),
+            "y": lambda: self._redo(event),
+        }
+        action = actions.get(key)
+        if action is None:
+            return None
+        action()
+        return "break"
+
+    def _configure_format_tags(self):
+        for name in ("sem_bold", "sem_italic", "sem_underline"):
+            self.text.tag_configure(name)
+        for alignment in ("left", "center", "right"):
+            self.text.tag_configure(f"align_{alignment}", justify=alignment)
+        for size in FONT_SIZE_OPTIONS:
+            self._ensure_size_tag(size)
+
+    def _ensure_size_tag(self, size):
+        size = int(size)
+        self.text.tag_configure(f"sem_size_{size}")
+        for bold in (False, True):
+            for italic in (False, True):
+                for underline in (False, True):
+                    name = self._display_tag_name(bold, italic, underline, size)
+                    if hasattr(self, f"_{name}_font"):
+                        continue
+                    font = tkfont.Font(
+                        family=self.base_font_family,
+                        size=max(6, round(size * 0.75)),
+                        weight="bold" if bold else "normal",
+                        slant="italic" if italic else "roman",
+                        underline=underline,
+                    )
+                    self.text.tag_configure(name, font=font)
+                    setattr(self, f"_{name}_font", font)
+
+    @staticmethod
+    def _display_tag_name(bold, italic, underline, size):
+        return f"display_{int(bold)}{int(italic)}{int(underline)}_{size}"
+
+    def _remember_typing_index(self, event):
+        if self.html_mode or not self.pending_formats or event.state & 0x4 or event.keysym in {
+            "Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next", "BackSpace", "Delete",
+        }:
+            return None
+        start = str(self.text.index("insert"))
+        self.after_idle(lambda: self._apply_pending_to_new_text(start))
+        return None
+
+    def _apply_pending_to_new_text(self, start):
+        if self.html_mode:
+            return
+        end = str(self.text.index("insert"))
+        if self.text.compare(end, ">", start):
+            for tag in self.pending_formats:
+                self.text.tag_add(tag, start, end)
+            if self.pending_alignment:
+                line_start = str(self.text.index(f"{start} linestart"))
+                line_end = str(self.text.index(f"{end} lineend+1c"))
+                self.text.tag_add(self.pending_alignment, line_start, line_end)
+            self._refresh_display_tags(start, end)
+
+    def _refresh_display_tags(self, start="1.0", end="end-1c"):
+        for tag in self.text.tag_names():
+            if tag.startswith("display_"):
+                self.text.tag_remove(tag, start, end)
+        index = str(self.text.index(start))
+        end_index = str(self.text.index(end))
+        while self.text.compare(index, "<", end_index):
+            tags = set(self.text.tag_names(index))
+            size_tag = next((name for name in tags if name.startswith("sem_size_")), "sem_size_14")
+            size = int(size_tag.rsplit("_", 1)[1])
+            self._ensure_size_tag(size)
+            display = self._display_tag_name(
+                "sem_bold" in tags, "sem_italic" in tags, "sem_underline" in tags, size
+            )
+            next_index = str(self.text.index(f"{index}+1c"))
+            self.text.tag_add(display, index, next_index)
+            index = next_index
+
+    def toggle_format(self, kind):
+        if self.html_mode:
+            return "break"
+        tag = f"sem_{kind}"
+        selection = self._selection_range()
+        if selection:
+            start, end = selection
+            fully_applied = self._range_fully_tagged(tag, start, end)
+            if fully_applied:
+                self.text.tag_remove(tag, start, end)
+            else:
+                self.text.tag_add(tag, start, end)
+            self._refresh_display_tags(start, end)
+            self._commit_history(force=True)
+        elif tag in self.pending_formats:
+            self.pending_formats.remove(tag)
+        else:
+            self.pending_formats.add(tag)
+        self.focus_editor()
+        return "break"
+
+    def _range_fully_tagged(self, tag, start, end):
+        index = str(self.text.index(start))
+        end_index = str(self.text.index(end))
+        if not self.text.compare(index, "<", end_index):
+            return False
+        while self.text.compare(index, "<", end_index):
+            if tag not in self.text.tag_names(index):
+                return False
+            index = str(self.text.index(f"{index}+1c"))
+        return True
+
+    def get_format_state(self):
+        """현재 선택 영역에서 공통으로 적용된 툴바 서식을 반환한다."""
+        selection = self._selection_range()
+        if selection:
+            start, end = selection
+            positions = []
+            index = str(self.text.index(start))
+            end_index = str(self.text.index(end))
+            while self.text.compare(index, "<", end_index):
+                if self.text.get(index, f"{index}+1c") != "\n":
+                    positions.append(index)
+                index = str(self.text.index(f"{index}+1c"))
+        else:
+            index = str(self.text.index("insert"))
+            if self.text.compare(index, ">", "1.0"):
+                index = str(self.text.index(f"{index}-1c"))
+            positions = [index]
+
+        def common_tag(tag):
+            return bool(positions) and all(tag in self.text.tag_names(position) for position in positions)
+
+        formats = {
+            kind: common_tag(f"sem_{kind}")
+            for kind in ("bold", "italic", "underline")
+        }
+        if not selection:
+            for kind in formats:
+                formats[kind] = formats[kind] or f"sem_{kind}" in self.pending_formats
+
+        sizes = set()
+        for position in positions:
+            size_tag = next(
+                (tag for tag in self.text.tag_names(position) if tag.startswith("sem_size_")),
+                "sem_size_14",
+            )
+            sizes.add(int(size_tag.rsplit("_", 1)[1]))
+        if not selection:
+            pending_size = next(
+                (tag for tag in self.pending_formats if tag.startswith("sem_size_")), None
+            )
+            if pending_size:
+                sizes = {int(pending_size.rsplit("_", 1)[1])}
+
+        alignments = set()
+        for position in positions:
+            alignment_tag = next(
+                (
+                    tag
+                    for tag in self.text.tag_names(position)
+                    if tag in {"align_left", "align_center", "align_right"}
+                ),
+                "align_left",
+            )
+            alignments.add(alignment_tag.removeprefix("align_"))
+        if not selection and self.pending_alignment.startswith("align_"):
+            alignments = {self.pending_alignment.removeprefix("align_")}
+        return {
+            **formats,
+            "size": next(iter(sizes)) if len(sizes) == 1 else None,
+            "alignment": next(iter(alignments)) if len(alignments) == 1 else None,
+        }
+
+    def set_font_size(self, size):
+        if self.html_mode:
+            return
+        size = int(size)
+        if not 8 <= size <= 48:
+            raise ValueError("글자 크기는 8~48 사이의 정수로 입력해 주세요.")
+        self._ensure_size_tag(size)
+        tag = f"sem_size_{size}"
+        selection = self._selection_range()
+        if selection:
+            start, end = selection
+            for existing in self.text.tag_names():
+                if existing.startswith("sem_size_"):
+                    self.text.tag_remove(existing, start, end)
+            self.text.tag_add(tag, start, end)
+            self._refresh_display_tags(start, end)
+            self._commit_history(force=True)
+        else:
+            self.pending_formats = {name for name in self.pending_formats if not name.startswith("sem_size_")}
+            self.pending_formats.add(tag)
+        self.focus_editor()
+
+    def set_alignment(self, alignment):
+        if self.html_mode or alignment not in {"left", "center", "right"}:
+            return
+        selection = self._selection_range()
+        start, end = selection if selection else ("insert", "insert")
+        start = str(self.text.index(f"{start} linestart"))
+        end = str(self.text.index(f"{end} lineend+1c"))
+        for existing in ("align_left", "align_center", "align_right"):
+            self.text.tag_remove(existing, start, end)
+        self.text.tag_add(f"align_{alignment}", start, end)
+        self.pending_alignment = f"align_{alignment}"
+        self._commit_history(force=True)
+        self.focus_editor()
 
     def _paste_rich_html(self, _event=None):
         clipboard_text = self._clipboard_text()
@@ -499,12 +905,16 @@ class WysiwygEditor(tk.Frame):
         return {key.lower(): html.unescape(value) for key, _, value in re.findall(r"([\w-]+)\s*=\s*(['\"])(.*?)\2", source)}
 
     def _insert_link(self, label, url):
+        tag = self._create_link_tag(url)
+        self.text.insert("insert", html.unescape(re.sub(r"<[^>]+>", "", label)), (tag,))
+
+    def _create_link_tag(self, url):
         self.counter += 1
         tag = f"wysiwyg_link_{self.counter}"
         self.links[tag] = url
         self.text.tag_configure(tag, foreground="#2878db", underline=True)
         self.text.tag_bind(tag, "<Button-3>", lambda event, link_tag=tag: self._show_link_menu(link_tag, event))
-        self.text.insert("insert", html.unescape(re.sub(r"<[^>]+>", "", label)), (tag,))
+        return tag
 
     def _show_link_menu(self, tag, event):
         menu = tk.Menu(
@@ -604,11 +1014,7 @@ class WysiwygEditor(tk.Frame):
         self.image_data[str(label)] = {"src": src, "alt": alt, "width": width, "height": height}
         label.bind("<Button-1>", lambda event, widget=label: self._select_embed(widget, event))
         label.bind("<Button-3>", lambda event, widget=label: self._show_image_menu(widget, event))
-        label.bind("<Control-c>", self._copy_content)
-        label.bind("<Control-x>", self._cut_content)
-        label.bind("<Control-v>", self._paste_rich_html)
-        label.bind("<Control-z>", self._undo)
-        label.bind("<Control-y>", self._redo)
+        label.bind("<Control-KeyPress>", self._handle_control_shortcut)
 
     def _clear_embed_selection(self):
         widget = self.selected_embed
@@ -770,51 +1176,66 @@ class WysiwygEditor(tk.Frame):
     def get_html(self, start="1.0", end="end-1c"):
         if self.html_mode:
             return self.text.get(start, end)
-        output = []
-        active_link = next((tag for tag in self.text.tag_names(start) if tag in self.links), None)
-        if active_link:
-            output.append(f'<a href="{html.escape(self.links[active_link], quote=True)}" target="_blank">')
-        for event, value, _index in self.text.dump(start, end, text=True, tag=True, window=True):
-            if event == "tagon" and value in self.links:
-                if active_link == value:
-                    continue
-                if active_link:
-                    output.append("</a>")
-                active_link = value
-                output.append(f'<a href="{html.escape(self.links[value], quote=True)}" target="_blank">')
-            elif event == "tagoff" and value == active_link:
-                output.append("</a>")
-                active_link = None
-            elif event == "window":
-                output.append(self.embeds.get(value, ""))
+        lines = [[]]
+        for event, value, index in self.text.dump(start, end, text=True, window=True):
+            if event == "window":
+                lines[-1].append((self.embeds.get(value, ""), set(self.text.tag_names(index)), True))
             elif event == "text":
-                output.append(html.escape(value).replace("\n", "<br>"))
-        if active_link:
-            output.append("</a>")
-        return "".join(output)
+                offset = 0
+                for part in re.split("(\n)", value):
+                    if not part:
+                        continue
+                    if part == "\n":
+                        lines.append([])
+                        offset += 1
+                        continue
+                    part_index = str(self.text.index(f"{index}+{offset}c"))
+                    lines[-1].append((part, set(self.text.tag_names(part_index)), False))
+                    offset += len(part)
+
+        rendered_lines = []
+        for line in lines:
+            pieces = []
+            alignment = "left"
+            for value, tags, is_markup in line:
+                alignment_tag = next((name for name in tags if name.startswith("align_")), "")
+                if alignment_tag:
+                    alignment = alignment_tag.split("_", 1)[1]
+                if is_markup:
+                    pieces.append(value)
+                    continue
+                content = html.escape(value)
+                link_tag = next((name for name in tags if name in self.links), "")
+                size_tag = next((name for name in tags if name.startswith("sem_size_")), "")
+                if "sem_underline" in tags:
+                    content = f"<u>{content}</u>"
+                if "sem_italic" in tags:
+                    content = f"<em>{content}</em>"
+                if "sem_bold" in tags:
+                    content = f"<strong>{content}</strong>"
+                if size_tag:
+                    size = size_tag.rsplit("_", 1)[1]
+                    content = f'<span style="font-size:{size}px">{content}</span>'
+                if link_tag:
+                    href = html.escape(self.links[link_tag], quote=True)
+                    content = f'<a href="{href}" target="_blank">{content}</a>'
+                pieces.append(content)
+            line_html = "".join(pieces)
+            if alignment != "left":
+                line_html = f'<div style="text-align:{alignment}">{line_html}</div>'
+            rendered_lines.append(line_html)
+        return "<br>".join(rendered_lines)
 
     def insert_html(self, value):
         if self.html_mode:
             self.text.insert("insert", value)
             return
-        pattern = re.compile(r"(<br\s*/?>|<hr\s*/?>|<a\b[^>]*>.*?</a>|<img\b[^>]*>)", re.IGNORECASE | re.DOTALL)
-        for part in pattern.split(value or ""):
-            if not part:
-                continue
-            lower = part.lower()
-            if lower.startswith("<br"):
-                self.text.insert("insert", "\n")
-            elif lower.startswith("<hr"):
-                self._insert_rule()
-            elif lower.startswith("<a"):
-                opening, label = part.split(">", 1)
-                self._insert_link(label.rsplit("</a", 1)[0], self._attributes(opening).get("href", ""))
-            elif lower.startswith("<img"):
-                self._insert_image(part)
-            else:
-                cleaned = re.sub(r"</?(?:p|div)[^>]*>", "\n", part, flags=re.IGNORECASE)
-                cleaned = html.unescape(re.sub(r"<[^>]+>", "", cleaned))
-                self.text.insert("insert", cleaned.lstrip("\n") if self.text.index("insert") == "1.0" else cleaned)
+        loader = _EditorHtmlLoader(self)
+        loader.feed(value or "")
+        loader.close()
+        if self.text.index("insert") != "1.0" and self.text.get("insert-1c", "insert") == "\n":
+            self.text.delete("insert-1c", "insert")
+        self._refresh_display_tags()
 
     def focus_editor(self):
         self.text.focus_set()
@@ -1181,6 +1602,85 @@ class App:
             arrowcolor=[("active", navy), ("readonly", navy)],
             bordercolor=[("focus", blue), ("readonly", "#c7d1dd")],
         )
+        # 에디터 툴바 전용 콤보박스. 기본 Combobox의 입체적인 테두리를
+        # 제거하고 툴바 버튼과 동일한 평면형 배색을 사용한다.
+        style.layout(
+            "FontSize.TCombobox",
+            [
+                ("Combobox.downarrow", {"side": "right", "sticky": "ns"}),
+                (
+                    "Combobox.field",
+                    {
+                        "sticky": "nswe",
+                        "children": [
+                            (
+                                "Combobox.padding",
+                                {
+                                    "sticky": "nswe",
+                                    "children": [("Combobox.textarea", {"sticky": "nswe"})],
+                                },
+                            )
+                        ],
+                    },
+                ),
+            ],
+        )
+        style.configure(
+            "FontSize.TCombobox",
+            padding=(8, 5),
+            foreground=navy,
+            fieldbackground=white,
+            background="#eef2f7",
+            arrowcolor=navy,
+            bordercolor="#cbd5e1",
+            lightcolor="#cbd5e1",
+            darkcolor="#cbd5e1",
+            borderwidth=1,
+            relief="flat",
+            arrowsize=13,
+            font=("맑은 고딕", 10),
+        )
+        style.map(
+            "FontSize.TCombobox",
+            fieldbackground=[("focus", white), ("active", white)],
+            foreground=[("focus", text), ("active", text)],
+            background=[("active", "#dfe7f1"), ("pressed", "#d4dde8")],
+            arrowcolor=[("active", navy), ("pressed", navy)],
+            bordercolor=[("focus", blue), ("active", "#aebdce")],
+            lightcolor=[("focus", blue)],
+            darkcolor=[("focus", blue)],
+        )
+        style.layout(
+            "ComboPopup.Vertical.TScrollbar",
+            [
+                (
+                    "Vertical.Scrollbar.trough",
+                    {
+                        "sticky": "ns",
+                        "children": [
+                            ("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nswe"})
+                        ],
+                    },
+                )
+            ],
+        )
+        style.configure(
+            "ComboPopup.Vertical.TScrollbar",
+            width=8,
+            troughcolor=white,
+            background="#aebdce",
+            bordercolor=white,
+            lightcolor="#aebdce",
+            darkcolor="#aebdce",
+            relief="flat",
+            borderwidth=0,
+        )
+        style.map(
+            "ComboPopup.Vertical.TScrollbar",
+            background=[("active", navy), ("pressed", navy)],
+            lightcolor=[("active", navy), ("pressed", navy)],
+            darkcolor=[("active", navy), ("pressed", navy)],
+        )
         self.root.option_add("*TCombobox*Listbox.background", white)
         self.root.option_add("*TCombobox*Listbox.foreground", text)
         self.root.option_add("*TCombobox*Listbox.selectBackground", blue)
@@ -1228,12 +1728,15 @@ class App:
         scroll_container = tk.Frame(self.root, bg=page_bg)
         scroll_container.pack(fill="both", expand=True)
         canvas = tk.Canvas(scroll_container, bg=page_bg, highlightthickness=0, borderwidth=0)
+        self.page_canvas = canvas
         scrollbar = ttk.Scrollbar(scroll_container, orient="vertical", command=canvas.yview)
+        self.page_scrollbar = scrollbar
         canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
         page = ttk.Frame(canvas, style="Page.TFrame", padding=(26, 22))
         page_window = canvas.create_window((0, 0), window=page, anchor="nw")
+        self.comboboxes = []
 
         def update_scroll_region(_event=None):
             bounds = canvas.bbox("all")
@@ -1251,15 +1754,25 @@ class App:
         def fit_page_width(event):
             canvas.itemconfigure(page_window, width=event.width)
 
-        def scroll_page(event):
-            if isinstance(event.widget, tk.Text):
-                return None
-            canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        def scroll_page_when_overflowed(event):
+            widget_class = event.widget.winfo_class() if event.widget.winfo_exists() else ""
+            if isinstance(event.widget, (tk.Text, ttk.Combobox, tk.Listbox)) or widget_class in {
+                "Text", "TCombobox", "Listbox", "ComboboxPopdown",
+            }:
+                # 내부 에디터와 펼쳐진 목록은 각각 자신의 스크롤만 처리한다.
+                return "break"
+            bounds = canvas.bbox("all")
+            if not bounds:
+                return "break"
+            content_height = bounds[3] - bounds[1]
+            viewport_height = canvas.winfo_height()
+            if viewport_height > 1 and content_height > viewport_height + 2:
+                canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
             return "break"
 
         page.bind("<Configure>", update_scroll_region)
         canvas.bind("<Configure>", fit_page_width)
-        self.root.bind_all("<MouseWheel>", scroll_page, add="+")
+        self.root.bind_all("<MouseWheel>", scroll_page_when_overflowed, add="+")
         card = ttk.Frame(page, style="Card.TFrame", padding=24)
         card.pack(fill="both", expand=True)
 
@@ -1272,8 +1785,10 @@ class App:
         sort_row.pack(fill="x", pady=(0, 18))
         ttk.Label(sort_row, text="배치 순서", style="Card.TLabel").pack(side="left")
         sort_box = ttk.Combobox(sort_row, textvariable=self.sort_mode, values=tuple(SORT_OPTIONS), state="readonly", width=22, style="Order.TCombobox")
+        self.comboboxes.append(sort_box)
         sort_box.pack(side="left", padx=(10, 12))
         sort_box.bind("<<ComboboxSelected>>", lambda _event: self.preview())
+        sort_box.bind("<MouseWheel>", lambda _event: "break", add="+")
         ttk.Label(sort_row, text="첫 번째 파일이 메인 이미지가 됩니다.", style="Hint.TLabel").pack(side="left")
 
         ttk.Separator(card).pack(fill="x", pady=(0, 18))
@@ -1303,45 +1818,303 @@ class App:
         price_entry_box.pack_propagate(False)
         ttk.Entry(price_entry_box, textvariable=self.price).pack(fill="both", expand=True)
         content_label_row = ttk.Frame(card, style="Card.TFrame")
-        content_label_row.pack(fill="x")
+        content_label_row.pack(fill="x", pady=(0, 5))
         ttk.Label(content_label_row, text="게시글 내용", style="Card.TLabel").pack(side="left")
-        editor_toolbar = ttk.Frame(content_label_row, style="Card.TFrame")
-        editor_toolbar.pack(side="left", padx=(12, 0))
-        for label, syntax in (
-            ("링크", "link"),
-            ("가로줄", "rule"),
-            ("이미지", "image"),
-        ):
-            toolbar_button = ttk.Button(
-                editor_toolbar,
-                text=label,
-                style="Editor.TButton",
-            )
-            toolbar_button.configure(
-                command=lambda kind=syntax, anchor=toolbar_button: self.insert_content_syntax(kind, anchor)
-            )
-            toolbar_button.pack(side="left", padx=(0, 5))
         self.html_view = tk.BooleanVar(value=False)
+        editor_toolbar = tk.Frame(card, bg="#eef2f7", padx=5, pady=4)
+        editor_toolbar.pack(fill="x")
+        self.font_size = tk.StringVar(value="14 px")
+        self.last_font_size = "14 px"
+        # Tk에서 음수 font size는 포인트가 아닌 화면 픽셀 단위다.
+        # 팝다운 항목별 폰트를 보관해 가비지 컬렉션으로 사라지지 않게 한다.
+        self.font_size_preview_fonts = {
+            size: tkfont.Font(root=self.root, family="맑은 고딕", size=-size)
+            for size in FONT_SIZE_OPTIONS
+        }
+
+        size_box = tk.Frame(
+            editor_toolbar, bg="#cbd5e1", highlightthickness=0, borderwidth=0,
+        )
+        self.font_size_box = size_box
+        size_box.pack(side="left", padx=(0, 5))
+        size_entry = tk.Entry(
+            size_box,
+            textvariable=self.font_size,
+            width=7,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            bg="#ffffff",
+            fg="#26384d",
+            insertbackground="#26384d",
+            font=("맑은 고딕", 10),
+            justify="left",
+        )
+        size_entry.pack(side="left", fill="y", padx=(1, 0), pady=1, ipady=5, ipadx=7)
+        size_button = tk.Button(
+            size_box,
+            text="▾",
+            width=2,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            bg="#eef2f7",
+            fg="#2e486b",
+            activebackground="#dfe7f1",
+            activeforeground="#2e486b",
+            font=("맑은 고딕", 10, "bold"),
+            padx=0,
+            pady=0,
+            cursor="hand2",
+        )
+        size_button.pack(side="left", fill="y", padx=(0, 1), pady=1)
+        self.font_size_combo = size_entry
+        self.font_size_button = size_button
+        size_entry.bind("<Return>", self.apply_editor_font_size)
+        size_entry.bind("<MouseWheel>", lambda _event: "break", add="+")
+        add_tooltip(size_box, "글자 크기")
+
+        def show_font_size_popup(_event=None):
+            existing = getattr(self, "font_size_popup", None)
+            if existing is not None and existing.winfo_exists():
+                closer = getattr(existing, "close_popup", None)
+                if closer is not None:
+                    closer()
+                else:
+                    existing.destroy()
+                    self.font_size_popup = None
+                return "break"
+
+            popup = tk.Toplevel(self.root)
+            self.font_size_popup = popup
+            # Windows에서 overrideredirect 창이 첫 매핑 위치 (0, 0)에 고정되지 않도록
+            # 완성된 좌표를 적용할 때까지 화면에 매핑하지 않는다.
+            popup.withdraw()
+            popup.overrideredirect(True)
+            popup.transient(self.root)
+            popup.attributes("-topmost", True)
+            popup.configure(bg="#cbd5e1")
+            outer = tk.Frame(popup, bg="#ffffff", padx=1, pady=1)
+            outer.pack(fill="both", expand=True, padx=1, pady=1)
+            preview_canvas = tk.Canvas(outer, bg="#ffffff", highlightthickness=0, borderwidth=0)
+            preview_scrollbar = ttk.Scrollbar(
+                outer, orient="vertical", command=preview_canvas.yview,
+                style="ComboPopup.Vertical.TScrollbar",
+            )
+            preview_canvas.configure(yscrollcommand=preview_scrollbar.set)
+            preview_canvas.pack(side="left", fill="both", expand=True)
+            rows = tk.Frame(preview_canvas, bg="#ffffff")
+            rows_window = preview_canvas.create_window((0, 0), window=rows, anchor="nw")
+            outside_binding = {"click": None, "unmap": None}
+
+            def close_popup(_close_event=None):
+                if outside_binding["click"] is not None:
+                    try:
+                        self.root.unbind("<ButtonPress-1>", outside_binding["click"])
+                    except tk.TclError:
+                        pass
+                    outside_binding["click"] = None
+                if outside_binding["unmap"] is not None:
+                    try:
+                        self.root.unbind("<Unmap>", outside_binding["unmap"])
+                    except tk.TclError:
+                        pass
+                    outside_binding["unmap"] = None
+                try:
+                    if popup.winfo_exists():
+                        popup.destroy()
+                except tk.TclError:
+                    pass
+                self.font_size_popup = None
+
+            def choose_size(size):
+                self.font_size.set(f"{size} px")
+                self.apply_editor_font_size()
+                close_popup()
+                self.content_editor.text.focus_set()
+
+            popup.close_popup = close_popup
+
+            def scroll_preview(event):
+                preview_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+                return "break"
+
+            try:
+                current_size = int(self.font_size.get().strip().lower().removesuffix("px").strip())
+            except ValueError:
+                current_size = 14
+            for size in FONT_SIZE_OPTIONS:
+                selected = size == current_size
+                row = tk.Label(
+                    rows,
+                    text=f"{size} px",
+                    font=self.font_size_preview_fonts[size],
+                    bg="#3478f6" if selected else "#ffffff",
+                    fg="#ffffff" if selected else "#26384d",
+                    anchor="w",
+                    padx=10,
+                    pady=5,
+                    cursor="hand2",
+                )
+                row.pack(fill="x")
+                row.bind("<Button-1>", lambda _click, value=size: choose_size(value))
+                row.bind("<MouseWheel>", scroll_preview)
+                if not selected:
+                    row.bind("<Enter>", lambda _enter, widget=row: widget.configure(bg="#eef2f7"))
+                    row.bind("<Leave>", lambda _leave, widget=row: widget.configure(bg="#ffffff"))
+
+            rows.update_idletasks()
+            popup.update_idletasks()
+            popup_width = max(150, rows.winfo_reqwidth() + 14)
+            max_popup_height = min(460, self.root.winfo_screenheight() - 80)
+            popup_height = min(max_popup_height, rows.winfo_reqheight() + 4)
+            preview_canvas.itemconfigure(rows_window, width=popup_width - 12)
+            preview_canvas.configure(scrollregion=(0, 0, popup_width - 12, rows.winfo_reqheight()))
+            if rows.winfo_reqheight() > popup_height:
+                preview_scrollbar.pack(side="right", fill="y")
+            x = size_box.winfo_rootx()
+            y = size_box.winfo_rooty() + size_box.winfo_height()
+            x = min(x, self.root.winfo_screenwidth() - popup_width)
+            if y + popup_height > self.root.winfo_screenheight():
+                y = size_box.winfo_rooty() - popup_height
+            popup.geometry(f"{popup_width}x{popup_height}+{max(0, x)}+{max(0, y)}")
+            popup.deiconify()
+            popup.update_idletasks()
+            popup.lift()
+            popup.bind("<Escape>", close_popup)
+            preview_canvas.bind("<MouseWheel>", scroll_preview)
+            popup.focus_force()
+
+            def bind_outside_click():
+                if popup.winfo_exists():
+                    outside_binding["click"] = self.root.bind(
+                        "<ButtonPress-1>", close_popup, add="+"
+                    )
+
+            # 현재 화살표 클릭 이벤트가 팝업을 즉시 다시 닫지 않도록 다음 틱에 등록한다.
+            popup.after_idle(bind_outside_click)
+            outside_binding["unmap"] = self.root.bind("<Unmap>", close_popup, add="+")
+
+            def release_topmost():
+                try:
+                    if popup.winfo_exists():
+                        popup.attributes("-topmost", False)
+                except tk.TclError:
+                    pass
+
+            popup.after(150, release_topmost)
+            return "break"
+
+        self.show_font_size_popup = show_font_size_popup
+        # ttk/tk Button의 클래스별 Release 처리에 의존하지 않고 누르는 순간 직접 연다.
+        size_button.configure(command=lambda: None)
+        size_button.bind("<ButtonPress-1>", show_font_size_popup)
+        size_entry.bind("<Alt-Down>", show_font_size_popup, add="+")
+        size_entry.bind("<F4>", show_font_size_popup, add="+")
+        self.toolbar_icons = {}
+        self.format_buttons = {}
+
+        def separator():
+            tk.Frame(editor_toolbar, bg="#cbd5e1", width=1, height=22).pack(side="left", padx=5)
+
+        def icon_button(icon_name, tooltip, command):
+            try:
+                image = tk.PhotoImage(file=str(resource_path(f"lucide/{icon_name}.png")))
+                self.toolbar_icons[icon_name] = image
+            except tk.TclError:
+                image = None
+            button = tk.Button(
+                editor_toolbar, image=image, text="" if image else tooltip[:1], command=command,
+                bg="#eef2f7", fg=navy, activebackground="#dfe7f1", activeforeground=navy,
+                relief="flat", borderwidth=0, highlightthickness=1,
+                highlightbackground="#eef2f7", width=28, height=26,
+                padx=0, pady=0, cursor="hand2",
+            )
+            button.pack(side="left", padx=1)
+            add_tooltip(button, tooltip)
+            return button
+
+        for icon_name, tooltip, kind in (
+            ("bold", "굵게 (Ctrl+B)", "bold"),
+            ("italic", "기울임 (Ctrl+I)", "italic"),
+            ("underline", "밑줄 (Ctrl+U)", "underline"),
+        ):
+            self.format_buttons[kind] = icon_button(
+                icon_name, tooltip, lambda kind=kind: self.content_editor.toggle_format(kind)
+            )
+        separator()
+        for icon_name, tooltip, alignment in (
+            ("align-left", "왼쪽 정렬", "left"),
+            ("align-center", "가운데 정렬", "center"),
+            ("align-right", "오른쪽 정렬", "right"),
+        ):
+            self.format_buttons[f"align_{alignment}"] = icon_button(
+                icon_name, tooltip,
+                lambda alignment=alignment: self.content_editor.set_alignment(alignment),
+            )
+        separator()
+        for icon_name, tooltip, syntax in (
+            ("link", "링크 삽입", "link"),
+            ("minus", "가로줄 삽입", "rule"),
+            ("image", "이미지 삽입", "image"),
+        ):
+            button = icon_button(icon_name, tooltip, lambda: None)
+            button.configure(command=lambda kind=syntax, anchor=button: self.insert_content_syntax(kind, anchor))
         tk.Checkbutton(
-            content_label_row,
+            editor_toolbar,
             text="HTML",
             variable=self.html_view,
             command=self.toggle_html_view,
-            bg=white,
+            bg="#eef2f7",
             fg=navy,
-            activebackground=white,
+            activebackground="#eef2f7",
             activeforeground=navy,
-            selectcolor=white,
+            selectcolor="#eef2f7",
             highlightthickness=0,
             borderwidth=0,
             relief="flat",
             font=("맑은 고딕", 9),
-            padx=8,
-            pady=3,
+            padx=7,
+            pady=2,
             cursor="hand2",
         ).pack(side="right")
         self.content_editor = WysiwygEditor(card, self.saved_content, height=150)
-        self.content_editor.pack(fill="x", pady=(5, 10))
+        self.content_editor.pack(fill="x", pady=(0, 10))
+
+        def update_toolbar_state(_event=None):
+            if self.content_editor.html_mode:
+                return
+            state = self.content_editor.get_format_state()
+            for kind in ("bold", "italic", "underline"):
+                selected = state[kind]
+                self.format_buttons[kind].configure(
+                    bg="#cfe0ff" if selected else "#eef2f7",
+                    activebackground="#c3d8fa" if selected else "#dfe7f1",
+                    relief="sunken" if selected else "flat",
+                    highlightthickness=1,
+                    highlightbackground="#3478f6" if selected else "#eef2f7",
+                )
+            for alignment in ("left", "center", "right"):
+                selected = state["alignment"] == alignment
+                self.format_buttons[f"align_{alignment}"].configure(
+                    bg="#cfe0ff" if selected else "#eef2f7",
+                    activebackground="#c3d8fa" if selected else "#dfe7f1",
+                    relief="sunken" if selected else "flat",
+                    highlightthickness=1,
+                    highlightbackground="#3478f6" if selected else "#eef2f7",
+                )
+            self.font_size.set(f"{state['size']} px" if state["size"] is not None else "— px")
+
+        self.update_toolbar_state = update_toolbar_state
+        for event_name in ("<<Selection>>", "<ButtonRelease-1>", "<KeyRelease>"):
+            self.content_editor.text.bind(
+                event_name, lambda _event: self.root.after_idle(update_toolbar_state), add="+"
+            )
+        for button in self.format_buttons.values():
+            button.bind(
+                "<ButtonRelease-1>", lambda _event: self.root.after_idle(update_toolbar_state), add="+"
+            )
+        update_toolbar_state()
         ttk.Label(card, text="태그 (쉼표로 구분)", style="Card.TLabel").pack(anchor="w")
         self.tag_input = TagBadgeInput(card, self.tags)
         self.tag_input.pack(fill="x", pady=(5, 18))
@@ -1471,12 +2244,12 @@ class App:
         dialog = tk.Toplevel(self.root)
         self.guide_window = dialog
         dialog.title("DogDrip.Con Uploader 사용 가이드")
-        dialog.geometry("680x640")
+        dialog.geometry("680x760")
         dialog.minsize(600, 570)
         dialog.transient(self.root)
         dialog.lift()
         dialog.configure(bg="#e8ebef")
-        center_toplevel(dialog, self.root, 680, 640)
+        center_toplevel(dialog, self.root, 680, 760)
 
         header = tk.Frame(dialog, bg=navy, padx=24, pady=14)
         header.pack(fill="x")
@@ -1505,13 +2278,17 @@ class App:
                 "2",
                 "게시글 정보 입력",
                 "• WYSIWYG 에디터에서 실제 결과와 유사한 형태로 본문을 작성합니다.\n"
-                "• 링크·가로줄·이미지 버튼과 HTML 보기를 사용할 수 있습니다.\n"
+                "• 툴바에서 글자 크기·굵게·기울임·밑줄·문단 정렬을 적용할 수 있습니다.\n"
+                "• 링크·가로줄·이미지 삽입과 HTML 보기를 사용할 수 있습니다.\n"
                 "• 링크와 이미지를 우클릭하면 내용·URL·크기를 수정할 수 있습니다.\n"
                 "• 태그는 쉼표로 구분하며 입력한 태그는 배지로 표시됩니다.\n"
                 "• 비워 둔 선택 항목은 등록 페이지의 기존 값을 변경하지 않습니다.\n"
                 "단축키 가이드\n"
-                "• Ctrl+C 복사 · Ctrl+X 잘라내기 · Ctrl+V 붙여넣기\n"
-                "• Ctrl+Z 실행 취소 · Ctrl+Y 다시 실행",
+                "• Ctrl+A 전체 선택 · Ctrl+C 복사\n"
+                "• Ctrl+X 잘라내기 · Ctrl+V 붙여넣기\n"
+                "• Ctrl+B 굵게 · Ctrl+I 기울임 · Ctrl+U 밑줄\n"
+                "• Ctrl+Z 실행 취소 · Ctrl+Y 다시 실행\n"
+                "• 한글 입력 상태에서도 같은 단축키가 동작합니다.",
             ),
             (
                 "3",
@@ -1683,6 +2460,19 @@ class App:
             self.content_editor.focus_editor()
         else:
             self.open_content_insert_dialog(kind, anchor)
+
+    def apply_editor_font_size(self, _event=None):
+        value = self.font_size.get().strip().lower().removesuffix("px").strip()
+        try:
+            size = int(value)
+            self.content_editor.set_font_size(size)
+        except (TypeError, ValueError):
+            self.root.bell()
+            self.font_size.set(self.last_font_size)
+            return "break"
+        self.last_font_size = f"{size} px"
+        self.font_size.set(self.last_font_size)
+        return "break"
 
     def toggle_html_view(self):
         self.content_editor.set_html_mode(self.html_view.get())
@@ -2127,6 +2917,20 @@ def run_startup_self_test(output_path):
     popup_centered = abs(popup_probe.winfo_x() - expected_popup_x) <= 1 and abs(popup_probe.winfo_y() - expected_popup_y) <= 1
     popup_probe.destroy()
     version_label_checked = app.version_label.cget("text") == f"v{APP_VERSION}"
+    font_combo_checked = (
+        str(app.font_size_combo.cget("state")) == "normal"
+        and app.font_size.get() == "14 px"
+        and app.font_size_button.winfo_exists()
+        and tuple(app.font_size_preview_fonts) == FONT_SIZE_OPTIONS
+        and not app.font_size_combo.bind("<FocusOut>")
+    )
+    app.page_canvas.configure(scrollregion=(0, 0, 900, 3000))
+    app.page_canvas.yview_moveto(0.4)
+    page_position_before_combo_wheel = app.page_canvas.yview()
+    app.font_size_combo.event_generate("<MouseWheel>", delta=-120)
+    combo_wheel_isolated = app.page_canvas.yview() == page_position_before_combo_wheel
+    app.page_canvas.yview_moveto(0)
+    root.update()
     empty_tag_entry_x = app.tag_input.entry.winfo_rootx()
     app.content_editor.insert_html('<a href="https://example.com">시작 테스트</a><hr>')
     app.tag_input.input_var.set("태그 테스트")
@@ -2144,6 +2948,23 @@ def run_startup_self_test(output_path):
     app.html_view.set(False)
     app.toggle_html_view()
     result = app.content_editor.get_html()
+    # 전용 폰트 팝다운의 캔버스 휠이 메인 페이지까지 전파되지 않는지 검증한다.
+    app.show_font_size_popup()
+    root.update()
+    popup_canvas = next(
+        child
+        for outer in app.font_size_popup.winfo_children()
+        for child in outer.winfo_children()
+        if isinstance(child, tk.Canvas)
+    )
+    app.page_canvas.configure(scrollregion=(0, 0, 900, 3000))
+    app.page_canvas.yview_moveto(0.4)
+    page_position_before_popup_wheel = app.page_canvas.yview()
+    popup_canvas.event_generate("<MouseWheel>", delta=-120)
+    popup_wheel_isolated = app.page_canvas.yview() == page_position_before_popup_wheel
+    app.font_size_popup.close_popup()
+    app.page_canvas.yview_moveto(0)
+    root.update()
     app.show_guide()
     root.update_idletasks()
     guide_labels = []
@@ -2156,12 +2977,15 @@ def run_startup_self_test(output_path):
     guide_text = "\n".join(guide_labels)
     guide_updated = all(
         phrase in guide_text
-        for phrase in ("WYSIWYG 에디터", "단축키 가이드", "Ctrl+C", "Ctrl+Z", "Ctrl+Y")
+        for phrase in ("WYSIWYG 에디터", "단축키 가이드", "Ctrl+A", "Ctrl+B", "Ctrl+C", "Ctrl+Z", "Ctrl+Y")
     )
     app.guide_window.destroy()
     payload = {
-        "ok": root.winfo_exists() == 1 and BRAND_TITLE in root.title() and version_label_checked and popup_centered and html_checked and badge_checked and cursor_restored and guide_updated and "시작 테스트" in result and "<hr" in result,
+        "ok": root.winfo_exists() == 1 and BRAND_TITLE in root.title() and version_label_checked and font_combo_checked and combo_wheel_isolated and popup_wheel_isolated and popup_centered and html_checked and badge_checked and cursor_restored and guide_updated and "시작 테스트" in result and "<hr" in result,
         "version_label": version_label_checked,
+        "font_combo": font_combo_checked,
+        "combo_wheel_isolated": combo_wheel_isolated,
+        "popup_wheel_isolated": popup_wheel_isolated,
         "popup_centered": popup_centered,
         "html_toggle": html_checked,
         "tag_badge": badge_checked,
