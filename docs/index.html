@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="DogDrip.Con Uploader 공식 온라인 사용 가이드">
+  <meta name="theme-color" content="#304d74">
+  <title>DogDrip.Con Uploader 사용 가이드</title>
+  <link rel="icon" href="assets/app-icon.png">
+  <link rel="stylesheet" href="assets/guide.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">본문으로 바로가기</a>
+  <header class="topbar">
+    <a class="brand" href="#top" aria-label="가이드 처음으로">
+      <img src="assets/brand-logo.png" alt="DogDrip.Con Uploader">
+    </a>
+    <div class="top-actions">
+      <span class="version">Guide · v1.1.1</span>
+      <a class="button button-light" href="https://github.com/ssbbrr92/dogdrip-con-uploader/releases/latest">최신 버전 받기</a>
+    </div>
+  </header>
+
+  <div class="page" id="top">
+    <aside class="sidebar" aria-label="문서 목차">
+      <p class="sidebar-label">ONLINE MANUAL</p>
+      <nav>
+        <a href="#start" class="active">빠른 시작</a>
+        <a href="#download">설치와 실행</a>
+        <a href="#images">1. 이미지 선택</a>
+        <a href="#post">2. 게시글 작성</a>
+        <a href="#editor">에디터 사용법</a>
+        <a href="#browser">3. 브라우저 배치</a>
+        <a href="#settings">설정과 데이터</a>
+        <a href="#troubleshooting">문제 해결</a>
+        <a href="#shortcuts">단축키</a>
+      </nav>
+      <div class="sidebar-card">
+        <span>현재 안내 버전</span>
+        <strong>v1.1.1</strong>
+        <a href="https://github.com/ssbbrr92/dogdrip-con-uploader">GitHub 저장소 ↗</a>
+      </div>
+    </aside>
+
+    <main id="main">
+      <section class="hero" id="start">
+        <div class="hero-copy">
+          <p class="eyebrow">DOGDRIP.CON UPLOADER GUIDE</p>
+          <h1>폴더 선택부터<br><span>브라우저 자동 배치</span>까지</h1>
+          <p class="lead">최대 50개의 개드립콘 이미지와 게시글 정보를 한 번에 준비하는 비공식 Windows 도구입니다. 최종 등록 전에는 브라우저에서 결과를 직접 확인합니다.</p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#quick-steps">3단계로 시작하기</a>
+            <a class="button button-outline" href="https://github.com/ssbbrr92/dogdrip-con-uploader/releases/tag/v1.1.1">v1.1.1 다운로드</a>
+          </div>
+          <div class="hero-meta">
+            <span>Windows</span><span>Portable EXE</span><span>무료 배포</span>
+          </div>
+        </div>
+        <figure class="app-shot">
+          <img src="assets/app-overview.png" alt="DogDrip.Con Uploader v1.1.1 전체 화면">
+          <figcaption>실제 v1.1.1 화면</figcaption>
+        </figure>
+      </section>
+
+      <section class="section" id="quick-steps">
+        <div class="section-heading">
+          <span>QUICK START</span>
+          <h2>딱 세 단계면 준비가 끝납니다</h2>
+          <p>프로그램은 등록 버튼을 대신 누르지 않습니다. 자동 배치 후 브라우저에서 내용을 확인하고 최종 등록하세요.</p>
+        </div>
+        <div class="step-grid">
+          <article class="step-card"><b>01</b><h3>업로드 이미지 선택</h3><p>이미지가 담긴 폴더와 배치 순서를 선택한 뒤 폴더 검사로 목록을 확인합니다.</p><a href="#images">자세히 보기 →</a></article>
+          <article class="step-card"><b>02</b><h3>게시글 정보 입력</h3><p>제목, 판매 포인트, 본문과 태그를 입력하고 WYSIWYG 툴바로 서식을 정리합니다.</p><a href="#post">자세히 보기 →</a></article>
+          <article class="step-card"><b>03</b><h3>브라우저에 자동 배치</h3><p>전용 브라우저에서 로그인한 뒤 이미지와 내용을 채우고 결과를 검토합니다.</p><a href="#browser">자세히 보기 →</a></article>
+        </div>
+      </section>
+
+      <section class="section" id="download">
+        <div class="section-heading"><span>DOWNLOAD</span><h2>설치 없이 바로 실행</h2></div>
+        <div class="two-column">
+          <div class="content-card">
+            <ol class="number-list">
+              <li><b>GitHub Releases에서 EXE 다운로드</b><span>최신 릴리스의 <code>DogDrip.Con-Uploader-*.exe</code>를 받습니다.</span></li>
+              <li><b>원하는 폴더에서 실행</b><span>설치 과정이 없는 Portable 프로그램입니다. 설정과 브라우저 프로필은 EXE 주변에 저장됩니다.</span></li>
+              <li><b>SmartScreen 안내 확인</b><span>코드 서명이 없는 무료 비공식 앱이라 최초 실행 시 경고가 나타날 수 있습니다. GitHub 릴리스의 SHA256과 내려받은 파일을 비교하세요.</span></li>
+            </ol>
+          </div>
+          <aside class="notice warning"><strong>공용 PC에서는 사용하지 마세요</strong><p>전용 브라우저 프로필에는 로그인 상태가 남을 수 있습니다. 개인 PC에서만 사용하고, 프로필 폴더를 공유하지 마세요.</p></aside>
+        </div>
+      </section>
+
+      <section class="section guide-section" id="images">
+        <div class="section-heading"><span>STEP 01</span><h2>업로드할 이미지 선택</h2><p>폴더 하나를 선택하면 지원되는 이미지가 정렬 기준에 따라 최대 50개까지 배치됩니다.</p></div>
+        <figure class="feature-image"><img src="assets/step-images.png" alt="폴더 선택과 배치 순서 화면"><figcaption><b>폴더 선택</b> → <b>배치 순서</b> 선택 → <b>폴더 검사</b> 순서로 확인하세요.</figcaption></figure>
+        <div class="info-grid">
+          <article><h3>지원 형식</h3><p>PNG, JPG, JPEG, GIF, WebP 파일을 지원합니다.</p></article>
+          <article><h3>배치 순서</h3><p>파일 이름·파일 이름 역순·수정된 날짜·수정된 날짜 역순으로 정렬할 수 있습니다.</p></article>
+          <article><h3>메인 이미지</h3><p>정렬 결과의 첫 번째 파일이 메인 이미지가 됩니다. 폴더 검사 결과는 파일마다 한 줄로 표시됩니다.</p></article>
+        </div>
+      </section>
+
+      <section class="section guide-section" id="post">
+        <div class="section-heading"><span>STEP 02</span><h2>게시글 정보 입력</h2><p>비워 둔 선택 항목은 등록 페이지의 기존 값을 바꾸지 않습니다.</p></div>
+        <figure class="feature-image"><img src="assets/step-editor.png" alt="게시글 정보와 WYSIWYG 에디터 화면"><figcaption>등록 페이지 주소, 제목, 판매 포인트, 본문, 태그를 한 화면에서 준비합니다.</figcaption></figure>
+        <div class="checklist">
+          <div><b>등록 페이지 주소</b><p>주소를 잘못 입력했다면 <em>기본 페이지</em> 버튼으로 기본 등록 주소를 복원합니다.</p></div>
+          <div><b>게시글 제목·판매 포인트</b><p>필요할 때만 입력합니다. 판매 포인트는 숫자로 입력하세요.</p></div>
+          <div><b>태그</b><p>쉼표를 입력하면 배지로 변환됩니다. 배지 오른쪽 X를 누르면 해당 태그만 삭제됩니다.</p></div>
+        </div>
+      </section>
+
+      <section class="section" id="editor">
+        <div class="section-heading"><span>WYSIWYG EDITOR</span><h2>보이는 모습 그대로 본문 작성</h2></div>
+        <div class="editor-layout">
+          <div class="toolbar-demo" aria-label="에디터 도구 설명">
+            <div class="fake-toolbar"><span class="size">14 px⌄</span><button><b>B</b></button><button><i>I</i></button><button><u>U</u></button><button>≡</button><button>≣</button><button>☷</button><button>🔗</button><button>―</button><button>▧</button><label>□ HTML</label></div>
+            <div class="fake-editor"><p><strong>굵게 표시할 텍스트</strong>와 <a href="#editor">링크</a>를 바로 확인할 수 있습니다.</p><p class="centered">가운데 정렬도 즉시 반영됩니다.</p></div>
+          </div>
+          <div class="editor-list">
+            <h3>제공 기능</h3>
+            <ul>
+              <li>굵게, 기울임, 밑줄</li><li>왼쪽, 가운데, 오른쪽 정렬</li><li>8~48px 글자 크기 및 직접 입력</li><li>링크·가로줄·이미지 삽입</li><li>이미지 URL, 설명, 크기와 원본 비율 수정</li><li>HTML 보기 전환</li>
+            </ul>
+          </div>
+        </div>
+        <aside class="notice"><strong>이미지와 링크 편집</strong><p>삽입된 이미지나 링크를 우클릭하면 현재 UI와 같은 색상의 수정 메뉴가 열립니다. 빈 영역의 우클릭 메뉴에서는 붙여넣기도 사용할 수 있습니다.</p></aside>
+      </section>
+
+      <section class="section guide-section" id="browser">
+        <div class="section-heading"><span>STEP 03</span><h2>기능 및 로그</h2><p>전용 브라우저는 기본 브라우저와 별도로 실행되며 로그인 상태를 전용 프로필에 유지합니다.</p></div>
+        <figure class="feature-image"><img src="assets/step-browser.png" alt="등록 페이지 열기, 이미지와 내용 채우기, 폴더 검사 버튼"><figcaption><b>등록 페이지 열기</b>로 로그인·등록 페이지 이동 후 <b>이미지와 내용 채우기</b>를 누릅니다.</figcaption></figure>
+        <div class="flow">
+          <div><span>1</span><b>등록 페이지 열기</b><p>Chrome을 우선 사용하고 없으면 Edge를 사용합니다.</p></div><i>→</i>
+          <div><span>2</span><b>로그인 및 페이지 확인</b><p>처음 한 번은 개드립넷에 직접 로그인합니다.</p></div><i>→</i>
+          <div><span>3</span><b>이미지와 내용 채우기</b><p>폴더와 게시글 정보를 등록 화면에 자동 배치합니다.</p></div><i>→</i>
+          <div><span>4</span><b>직접 최종 등록</b><p>브라우저에서 결과를 확인한 후 등록 버튼을 누릅니다.</p></div>
+        </div>
+      </section>
+
+      <section class="section" id="settings">
+        <div class="section-heading"><span>SETTINGS</span><h2>설정과 로컬 데이터</h2></div>
+        <div class="file-table">
+          <div><code>dogdrip-con-uploader-settings.json</code><span>화면 입력값과 사용자 설정</span></div>
+          <div><code>dogdrip-con-uploader.ini</code><span>사이트 필드명·선택자·target_host 매칭</span></div>
+          <div><code>dogdrip-con-browser-profile/</code><span>전용 브라우저 로그인 프로필</span></div>
+        </div>
+        <p class="muted">이전 <code>dogcon</code> 이름의 구성 파일이 발견되면 새 <code>dogdrip-con</code> 이름으로 이전하여 기존 설정을 이어서 사용합니다. 화면에 보이는 작업 로그는 별도 로그 파일로 저장하지 않습니다.</p>
+      </section>
+
+      <section class="section" id="troubleshooting">
+        <div class="section-heading"><span>TROUBLESHOOTING</span><h2>자주 묻는 문제</h2></div>
+        <div class="faq">
+          <details open><summary>SmartScreen에서 알 수 없는 앱으로 표시됩니다.</summary><p>무료 비공식 앱이므로 유료 코드 서명이 적용되지 않았습니다. 반드시 이 저장소의 Releases에서 받고, 릴리스에 표시된 SHA256과 파일을 비교하세요.</p></details>
+          <details><summary>이미지가 예상 순서와 다르게 배치됩니다.</summary><p>폴더 검사 전에 배치 순서를 확인하세요. 파일 이름 정렬은 image2가 image10보다 먼저 오도록 자연 정렬을 사용합니다.</p></details>
+          <details><summary>자동 배치가 갑자기 동작하지 않습니다.</summary><p>사이트의 입력 필드 이름이나 구조가 바뀌었을 수 있습니다. 매칭 설정에서 값을 확인하고, 최신 릴리스가 있는지 살펴보세요.</p></details>
+          <details><summary>전용 브라우저 기록을 초기화하고 싶습니다.</summary><p>프로그램과 브라우저를 모두 종료한 뒤 <code>dogdrip-con-browser-profile</code> 폴더를 삭제하면 됩니다. 저장된 로그인 상태도 함께 사라집니다.</p></details>
+        </div>
+      </section>
+
+      <section class="section" id="shortcuts">
+        <div class="section-heading"><span>SHORTCUTS</span><h2>에디터 단축키</h2></div>
+        <div class="shortcut-grid">
+          <kbd>Ctrl + A <small>전체 선택</small></kbd><kbd>Ctrl + B <small>굵게</small></kbd><kbd>Ctrl + I <small>기울임</small></kbd><kbd>Ctrl + U <small>밑줄</small></kbd><kbd>Ctrl + C <small>복사</small></kbd><kbd>Ctrl + X <small>잘라내기</small></kbd><kbd>Ctrl + V <small>붙여넣기</small></kbd><kbd>Ctrl + Z <small>실행 취소</small></kbd><kbd>Ctrl + Y <small>다시 실행</small></kbd>
+        </div>
+      </section>
+
+      <footer>
+        <img src="assets/app-icon.png" alt="">
+        <div><strong>DogDrip.Con Uploader</strong><p>무료 비공식 소프트웨어입니다.<br>개드립넷의 명칭·서비스·이미지에 대한 권리는 개드립넷(dogdrip.net)에 있습니다.</p></div>
+        <a href="#top">맨 위로 ↑</a>
+      </footer>
+    </main>
+  </div>
+  <script src="assets/guide.js"></script>
+</body>
+</html>
