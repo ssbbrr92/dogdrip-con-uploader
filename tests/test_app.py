@@ -15,6 +15,7 @@ from app import (
     LEGACY_SETTINGS_FILENAME,
     MAPPING_DEFAULTS,
     MAPPING_FILENAME,
+    ONLINE_GUIDE_URL,
     PROFILE_DIRECTORY,
     SETTINGS_FILENAME,
     TagBadgeInput,
@@ -24,9 +25,17 @@ from app import (
     decode_preview_image,
     matching_image_dimension,
     migrate_legacy_config,
+    open_online_guide,
     read_mapping_file,
     render_content,
 )
+
+
+class OnlineGuideTests(unittest.TestCase):
+    @patch("app.webbrowser.open_new_tab", return_value=True)
+    def test_opens_public_manual_in_default_browser(self, open_tab):
+        self.assertTrue(open_online_guide())
+        open_tab.assert_called_once_with(ONLINE_GUIDE_URL)
 
 
 class ImagePreviewTests(unittest.TestCase):

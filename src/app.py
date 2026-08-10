@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import webbrowser
 
 # Tcl 8.6.13 on Windows can reject PyInstaller's underscore-prefixed library
 # directories as well as backslash-form paths. Normalize both before tkinter
@@ -44,6 +45,7 @@ APP_TITLE = "개드립콘 업로더"
 BRAND_TITLE = "DogDrip.Con Uploader"
 APP_VERSION = "1.1.1"
 DEFAULT_URL = "https://www.dogdrip.net/index.php?mid=dogcon&act=dispDogconWrite"
+ONLINE_GUIDE_URL = "https://ssbbrr92.github.io/dogdrip-con-uploader/"
 SETTINGS_FILENAME = "dogdrip-con-uploader-settings.json"
 MAPPING_FILENAME = "dogdrip-con-uploader.ini"
 LEGACY_SETTINGS_FILENAME = "dogcon-uploader-settings.json"
@@ -105,6 +107,11 @@ def normalize_url_prefix(value):
         return value
     schemes = re.findall(r"https?://", match.group(1), re.IGNORECASE)
     return schemes[-1].lower() + match.group(2)
+
+
+def open_online_guide():
+    """Open the public manual in the user's default browser."""
+    return webbrowser.open_new_tab(ONLINE_GUIDE_URL)
 
 
 def center_toplevel(window, parent, width=None, height=None):
@@ -2261,6 +2268,7 @@ class App:
         footer.pack(side="bottom", fill="x")
         footer.pack_propagate(False)
         tk.Label(footer, text="이 안내는 최초 실행 시 한 번만 자동으로 표시됩니다.", bg="#e8ebef", fg=muted, font=("맑은 고딕", 9)).pack(side="left", anchor="center", pady=15)
+        ttk.Button(footer, text="온라인 매뉴얼 열기", command=open_online_guide, style="Soft.TButton").pack(side="left", anchor="center", padx=(12, 0), pady=8)
         ttk.Button(footer, text="닫기", command=dialog.destroy, style="Accent.TButton").pack(side="right", anchor="center", pady=8)
 
         body = tk.Frame(dialog, bg="#e8ebef", padx=22, pady=10)
@@ -2968,20 +2976,24 @@ def run_startup_self_test(output_path):
     app.show_guide()
     root.update_idletasks()
     guide_labels = []
+    guide_buttons = []
     pending_widgets = [app.guide_window]
     while pending_widgets:
         current_widget = pending_widgets.pop()
         pending_widgets.extend(current_widget.winfo_children())
         if isinstance(current_widget, tk.Label):
             guide_labels.append(str(current_widget.cget("text")))
+        if isinstance(current_widget, ttk.Button):
+            guide_buttons.append(str(current_widget.cget("text")))
     guide_text = "\n".join(guide_labels)
     guide_updated = all(
         phrase in guide_text
         for phrase in ("WYSIWYG 에디터", "단축키 가이드", "Ctrl+A", "Ctrl+B", "Ctrl+C", "Ctrl+Z", "Ctrl+Y")
     )
+    online_guide_button_checked = "온라인 매뉴얼 열기" in guide_buttons
     app.guide_window.destroy()
     payload = {
-        "ok": root.winfo_exists() == 1 and BRAND_TITLE in root.title() and version_label_checked and font_combo_checked and combo_wheel_isolated and popup_wheel_isolated and popup_centered and html_checked and badge_checked and cursor_restored and guide_updated and "시작 테스트" in result and "<hr" in result,
+        "ok": root.winfo_exists() == 1 and BRAND_TITLE in root.title() and version_label_checked and font_combo_checked and combo_wheel_isolated and popup_wheel_isolated and popup_centered and html_checked and badge_checked and cursor_restored and guide_updated and online_guide_button_checked and "시작 테스트" in result and "<hr" in result,
         "version_label": version_label_checked,
         "font_combo": font_combo_checked,
         "combo_wheel_isolated": combo_wheel_isolated,
@@ -2993,6 +3005,7 @@ def run_startup_self_test(output_path):
         "mouse_pointer_reset": app.tag_input._pointer_reset_count == 1,
         "tag_layout_collapsed": tag_layout_collapsed,
         "guide_updated": guide_updated,
+        "online_guide_button": online_guide_button_checked,
         "title": root.title(),
         "size": [root.winfo_width(), root.winfo_height()],
         "html": result,
