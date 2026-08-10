@@ -82,6 +82,16 @@
 .preview-tags b { margin-left: 2px; font-size: 12px; }
 .preview-caption { margin: 18px -30px -30px; padding: 13px 30px; border-top: 1px solid #d6e0ec; color: #59718c; font-size: 13px; }
 
+/* 대표 화면은 실제 프로그램 전체 구성이 보이도록 자르지 않습니다. */
+.app-shot { display: flex; justify-content: center; }
+.app-shot img {
+  width: auto;
+  max-width: 100%;
+  max-height: 620px;
+  object-fit: contain;
+  object-position: center;
+}
+
 @media (max-width: 680px) {
   .post-preview { padding: 18px; }
   .preview-control,
