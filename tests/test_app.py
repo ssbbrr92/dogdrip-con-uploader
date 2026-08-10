@@ -9,6 +9,7 @@ from PIL import Image as PILImage
 from app import (
     App,
     DEFAULT_URL,
+    FONT_SIZE_OPTIONS,
     LEGACY_MAPPING_FILENAME,
     LEGACY_PROFILE_DIRECTORY,
     LEGACY_SETTINGS_FILENAME,
@@ -430,6 +431,64 @@ class HtmlOnlyEditorTests(unittest.TestCase):
             self.assertEqual(editor.get_html(), "일반 텍스트")
             editor._undo()
             self.assertEqual(editor.get_html(), "")
+        finally:
+            root.destroy()
+
+    def test_rich_text_formatting_round_trips_as_html(self):
+        import tkinter as tk
+
+        source = (
+            '<div style="text-align:center">'
+            '<span style="font-size:18px"><strong><em><u>서식 본문</u></em></strong></span>'
+            '</div>'
+        )
+        root = tk.Tk(); root.geometry("640x300+-10000+-10000")
+        try:
+            editor = WysiwygEditor(root, source)
+            editor.pack(fill="both", expand=True); root.update()
+            rendered = editor.get_html()
+            self.assertIn('style="text-align:center"', rendered)
+            self.assertIn('style="font-size:18px"', rendered)
+            self.assertIn("<strong>", rendered)
+            self.assertIn("<em>", rendered)
+            self.assertIn("<u>", rendered)
+            self.assertIn("서식 본문", rendered)
+        finally:
+            root.destroy()
+
+    def test_toolbar_applies_format_size_and_alignment_to_selection(self):
+        import tkinter as tk
+
+        root = tk.Tk(); root.geometry("640x300+-10000+-10000")
+        try:
+            editor = WysiwygEditor(root, "선택 본문")
+            editor.pack(fill="both", expand=True); root.update()
+            editor.text.tag_add("sel", "1.0", "1.5")
+            editor.toggle_format("bold")
+            editor.text.tag_add("sel", "1.0", "1.5")
+            editor.set_font_size(24)
+            editor.text.tag_add("sel", "1.0", "1.5")
+            editor.set_alignment("right")
+            rendered = editor.get_html()
+            self.assertIn("<strong>선택 본문</strong>", rendered)
+            self.assertIn('style="font-size:24px"', rendered)
+            self.assertIn('style="text-align:right"', rendered)
+        finally:
+            root.destroy()
+
+    def test_editable_font_size_range_and_presets(self):
+        import tkinter as tk
+
+        self.assertEqual(FONT_SIZE_OPTIONS, tuple(range(8, 17)) + (18, 20, 24, 28, 32, 36, 40, 48))
+        root = tk.Tk(); root.geometry("640x300+-10000+-10000")
+        try:
+            editor = WysiwygEditor(root, "직접 크기")
+            editor.pack(fill="both", expand=True); root.update()
+            editor.text.tag_add("sel", "1.0", "1.5")
+            editor.set_font_size(13)
+            self.assertIn('style="font-size:13px"', editor.get_html())
+            with self.assertRaises(ValueError):
+                editor.set_font_size(49)
         finally:
             root.destroy()
 
