@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>게시글 내용 편집기</title>
+  <link rel="stylesheet" href="editor.css">
+</head>
+<body>
+  <div id="toolbar" aria-label="게시글 편집 도구">
+    <div class="command-row">
+      <button type="button" data-command="undo" title="실행 취소">↶</button><button type="button" data-command="redo" title="다시 실행">↷</button>
+      <span class="tool-separator"></span>
+      <button type="button" data-command="bold" title="굵게"><b>B</b></button><button type="button" data-command="italic" title="기울임"><i>I</i></button><button type="button" data-command="underline" title="밑줄"><u>U</u></button><button type="button" data-command="strike" title="취소선"><s>S</s></button><button type="button" data-command="removeformat" title="서식 제거">Tx</button>
+      <span class="tool-separator"></span>
+      <button type="button" data-action="link" title="링크">🔗</button><button type="button" data-action="image" title="이미지">▧</button><button type="button" data-action="table" title="표">▦</button><button type="button" data-command="horizontalrule" title="가로줄">―</button><button type="button" data-action="specialchar" title="특수 문자">Ω</button>
+    </div>
+    <div class="command-row">
+      <button type="button" data-command="justifyleft" title="왼쪽 정렬">≡</button><button type="button" data-command="justifycenter" title="가운데 정렬">≡</button><button type="button" data-command="justifyright" title="오른쪽 정렬">≡</button><button type="button" data-command="justifyblock" title="양쪽 정렬">☰</button>
+      <span class="tool-separator"></span>
+      <button type="button" data-command="numberedlist" title="번호 목록">1.</button><button type="button" data-command="bulletedlist" title="글머리 목록">•</button><button type="button" data-command="outdent" title="내어쓰기">⇤</button><button type="button" data-command="indent" title="들여쓰기">⇥</button><button type="button" data-command="blockquote" title="인용">❞</button><button type="button" data-command="selectall" title="전체 선택">전체</button>
+      <label class="color-tool" title="글자색">A<input id="textColor" type="color" value="#17345d" aria-label="글자색"></label><label class="color-tool color-background" title="배경색">A<input id="backgroundColor" type="color" value="#fff3a3" aria-label="배경색"></label>
+    </div>
+    <div id="nativeCombos" class="native-combos">
+      <label><span class="sr-only">스타일</span><select id="styleSelect" aria-label="스타일"><option value="">스타일</option><option value="strong">강조</option><option value="code">코드</option><option value="mark">하이라이트</option></select></label>
+      <label><span class="sr-only">문단</span><select id="formatSelect" aria-label="문단"><option value="">문단</option><option value="p">보통</option><option value="h1">제목 1</option><option value="h2">제목 2</option><option value="h3">제목 3</option><option value="pre">서식 있음</option></select></label>
+      <label><span class="sr-only">글꼴</span><select id="fontSelect" aria-label="글꼴"><option value="">글꼴</option><option value="Malgun Gothic">맑은 고딕</option><option value="Gulim">굴림</option><option value="Dotum">돋움</option><option value="Batang">바탕</option><option value="Arial">Arial</option><option value="Times New Roman">Times New Roman</option></select></label>
+      <label><span class="sr-only">크기</span><select id="sizeSelect" aria-label="크기"><option value="">크기</option><option value="10px">10px</option><option value="12px">12px</option><option value="14px">14px</option><option value="16px">16px</option><option value="18px">18px</option><option value="20px">20px</option><option value="24px">24px</option><option value="28px">28px</option><option value="32px">32px</option></select></label>
+    </div>
+  </div>
+  <div id="editor" class="editor-surface" contenteditable="true" role="textbox" aria-multiline="true" aria-label="게시글 내용"></div>
+  <div id="editorDialog" class="editor-dialog" hidden>
+    <form id="editorDialogForm" class="editor-dialog-card">
+      <h2 id="editorDialogTitle"></h2>
+      <div id="editorDialogFields"></div>
+      <div class="dialog-actions"><button id="editorDialogCancel" type="button">취소</button><button type="submit" class="dialog-confirm">확인</button></div>
+    </form>
+  </div>
+  <script src="vendor/ckeditor/ckeditor.js"></script>
+  <script src="editor.js"></script>
+</body>
+</html>

@@ -9,3 +9,4 @@ dogcon-uploader-settings.json
 *.log
 .idea/
 .vscode/
+.tmp-lite-chrome-profile-*/

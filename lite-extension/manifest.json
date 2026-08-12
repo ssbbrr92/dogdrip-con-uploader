@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "DogDrip.Con Uploader Lite",
+  "version": "1.0.1",
+  "description": "개드립콘 등록 페이지에 이미지와 게시글 정보를 자동으로 배치합니다.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "permissions": ["storage", "tabs", "sidePanel", "downloads"],
+  "host_permissions": ["https://*.dogdrip.net/*"],
+  "action": {
+    "default_title": "DogDrip.Con Uploader Lite 열기",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "popup.html"
+  },
+  "sandbox": {
+    "pages": ["editor.html"]
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; img-src 'self' data:;",
+    "sandbox": "sandbox allow-scripts allow-forms allow-popups allow-modals; script-src 'self' 'unsafe-inline' 'unsafe-eval'; child-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:;"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.dogdrip.net/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

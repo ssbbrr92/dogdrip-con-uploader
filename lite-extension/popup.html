@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DogDrip.Con Uploader Lite</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="header">
+    <div class="brand-mark" aria-hidden="true">
+      <span>D</span>
+      <img id="brandImage" src="icons/icon-128.png" alt="">
+    </div>
+    <div>
+      <h1>DogDrip.Con Uploader</h1>
+      <p>Lite <span class="divider">|</span> v1.0.1</p>
+    </div>
+  </header>
+
+  <nav class="workspace-tabs" aria-label="입력내용 작업 탭">
+    <div id="profileTabs" class="profile-tabs"></div>
+    <div id="tabScrollbar" class="tab-scrollbar" aria-hidden="true"><span id="tabScrollThumb"></span></div>
+    <div class="tab-tools">
+      <button id="exportProfiles" type="button" title="내보내기" aria-label="내보내기">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5z"/><path d="M14 2v6h6"/><path d="M12 18v-6"/><path d="m9 15 3 3 3-3"/></svg>
+      </button>
+      <label title="가져오기" aria-label="가져오기">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5z"/><path d="M14 2v6h6"/><path d="M12 12v6"/><path d="m15 15-3-3-3 3"/></svg>
+        <input id="importProfiles" type="file" accept="application/json,.json">
+      </label>
+      <button id="addProfileTab" type="button" class="add-tab" title="새 작업 탭">+</button>
+    </div>
+  </nav>
+
+  <main>
+    <div class="content-scroll">
+    <section class="section">
+      <h2 class="section-title"><span>1</span> 업로드할 이미지 선택 <button id="saveProfile" type="button" class="save-tab">저장 (Ctrl+S)</button></h2>
+      <label class="folder-button" for="folderInput">이미지 폴더 선택</label>
+      <input id="folderInput" type="file" webkitdirectory multiple accept=".png,.jpg,.jpeg,.gif,.webp">
+      <div id="folderSummary" class="summary">폴더를 선택해 주세요.</div>
+      <div class="field compact">
+        <label for="sortMode">배치 순서</label>
+        <select id="sortMode">
+          <option value="name">파일 이름</option>
+          <option value="name_desc">파일 이름 (역순)</option>
+          <option value="mtime">수정된 날짜</option>
+          <option value="mtime_desc">수정된 날짜 (역순)</option>
+        </select>
+      </div>
+      <details>
+        <summary>배치 순서 미리보기</summary>
+        <ol id="filePreview" class="file-preview"></ol>
+      </details>
+    </section>
+
+    <section class="section post-info-section">
+      <h2 class="collapse-heading">
+        <button id="postInfoToggle" type="button" class="collapse-toggle" aria-expanded="true" aria-controls="postInfoScrollShell">
+          <span>2</span> 게시글 정보 <small>(선택)</small>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+      </h2>
+      <div id="postInfoScrollShell" class="post-info-scroll-shell">
+      <div id="postInfoContent" class="post-info-content">
+      <div class="field registration-row">
+        <label>개드립콘 등록 페이지 주소<input id="registrationUrl" type="url" autocomplete="off"></label>
+        <button id="defaultRegistrationUrl" type="button" class="mapping-button">기본 페이지</button>
+      </div>
+      <div class="field row-fields">
+        <label>게시글 제목<input id="title" type="text" autocomplete="off"></label>
+        <label class="price">판매 포인트<input id="price" type="number" min="0" inputmode="numeric"></label>
+      </div>
+      <div class="field">
+        <label for="content">게시글 내용</label>
+        <iframe id="contentFrame" class="editor-frame" src="editor.html" title="게시글 내용 편집기"></iframe>
+      </div>
+      <div class="field">
+        <label for="tags">태그 (쉼표로 구분)</label>
+        <input id="tags" type="text" autocomplete="off">
+      </div>
+      </div>
+      <div id="postInfoScrollbar" class="post-info-scrollbar" aria-hidden="true"><span id="postInfoScrollThumb"></span></div>
+      </div>
+    </section>
+    </div>
+
+    <section class="section actions-section">
+      <h2><span>3</span> 기능 및 로그</h2>
+      <div class="button-row">
+        <button id="openPage" class="secondary">등록 페이지 열기</button>
+        <button id="fillPage" class="primary">이미지와 내용 채우기</button>
+        <button id="mappingSettings" class="mapping-button">⚙ 매핑 설정</button>
+      </div>
+      <div id="status" class="status" role="status">준비되었습니다.</div>
+      <div id="log" class="log" aria-label="작업 로그"></div>
+    </section>
+  </main>
+
+  <div id="mappingDialog" class="mapping-dialog" hidden>
+    <form id="mappingForm" class="mapping-card">
+      <h2>페이지 매핑 설정</h2>
+      <p>사이트의 HTML 구조가 변경된 경우에만 수정하세요.</p>
+      <div id="mappingFields" class="mapping-fields"></div>
+      <small>추가 이미지 패턴에는 번호가 들어갈 <code>{index}</code>가 필요합니다.</small>
+      <div class="mapping-actions">
+        <button id="mappingDefaults" type="button">기본값 복원</button>
+        <span></span>
+        <button id="mappingCancel" type="button">취소</button>
+        <button type="submit" class="primary">저장</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="deleteTabDialog" class="mapping-dialog" hidden>
+    <div class="delete-tab-card" role="dialog" aria-modal="true" aria-labelledby="deleteTabTitle">
+      <h2 id="deleteTabTitle">작업 탭 삭제</h2>
+      <p><strong id="deleteTabName"></strong> 탭을 삭제합니다.<br>계속하시겠습니까?</p>
+      <label class="delete-session-option">
+        <input id="skipDeleteConfirmSession" type="checkbox">
+        <span>이번 세션에서 다시 보지 않음</span>
+      </label>
+      <div class="delete-tab-actions">
+        <button id="cancelDeleteTab" type="button">취소</button>
+        <button id="confirmDeleteTab" type="button" class="delete-confirm">삭제</button>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    무료 비공식 소프트웨어입니다.<br>
+    개드립넷 명칭·서비스·관련 이미지에 대한 권리는 dogdrip.net에 있습니다.
+  </footer>
+  <script src="popup.js"></script>
+</body>
+</html>
